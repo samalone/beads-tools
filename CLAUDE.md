@@ -63,19 +63,28 @@ README.md                       user-facing overview
 
 ## Build / test
 
-There is **no build**. Testing today is the first-party validator plus
-(forthcoming) shell tests — see the open bead for the test suite.
+There is **no build**. CI (`.github/workflows/ci.yml`) runs three layers on a
+macOS + Linux matrix for every PR; run them locally with:
 
 ```bash
-claude plugin validate ./ --strict          # manifest / hooks / frontmatter
+# manifest / hooks / frontmatter. NON-strict on purpose: the intentional
+# plugin-root CLAUDE.md triggers a "not loaded as project context" warning that
+# makes --strict FAIL. CI allowlists exactly that one warning and fails on any
+# other, so don't add --strict here.
+claude plugin validate ./
 claude --plugin-dir ./                        # load the real layout locally, then /reload-plugins
-bash -n bin/bd-mode scripts/*.sh              # syntax
-shellcheck bin/bd-mode scripts/*.sh           # lint (bring your own; not yet in CI)
+bash -n bin/bd-mode scripts/*.sh              # syntax (+ `sh -n` for inject-beads-workflow.sh)
+shellcheck bin/bd-mode scripts/*.sh           # lint  (+ `-s sh` for the POSIX injector)
+bats test/                                     # ~3 min; isolated bd + Dolt fixtures
 ```
 
-Automated tests (`shellcheck` + `bats` fixtures + `claude plugin validate --strict`
-in CI) are **not yet built** — that's the tracked bead. Until then, exercise
-changes against a throwaway `bd init` project in a `mktemp -d`, never a live repo.
+The `bats` suite lives under `test/` (shared harness in `test/helpers/setup.bash`)
+and is fully isolated: each test builds a throwaway `bd init` project with a bare
+git origin under `$HOME` (bd rejects `/tmp`-family "unsafe" locations; override
+the base with `BD_TESTS_TMPDIR`), exercises a tool, asserts, and tears down —
+stopping only its own Dolt server, **never** a machine-wide `bd dolt killall`.
+Never exercise changes against a live repo. Install the local tools with
+`brew install bats-core shellcheck` (bd 1.1.x must already be present).
 
 ## Beads
 
