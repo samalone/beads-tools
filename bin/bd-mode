@@ -145,13 +145,15 @@ sync_remote() {
 # fingerprint (for the pre/post equivalence check)
 # ---------------------------------------------------------------------------
 fingerprint() {
-    # sorted issue IDs + total count; stable across a byte-identical copy.
-    # Guarded so a transient bd hiccup (pipefail) can't abort the switch —
-    # especially the post-switch call, where it would trigger a needless rollback.
-    local ids total
-    ids=$(bd list --json 2>/dev/null | jq -r '.[].id' 2>/dev/null | sort | tr '\n' ',') || ids=""
+    # Content signal, not just IDs: {id,status,updated_at} per issue (updated_at
+    # bumps on ANY edit — status/title/comment) plus the total count. This catches
+    # a stale bootstrap that has the same IDs but lost uncommitted content, so we
+    # don't delete the source over it. Stable across a byte-identical copy.
+    # Guarded so a transient bd/pipefail hiccup can't abort a verified switch.
+    local body total
+    body=$(bd list --json 2>/dev/null | jq -S -c 'sort_by(.id) | map({id, status, updated_at})' 2>/dev/null) || body=""
     total=$(bd stats 2>/dev/null | awk '/Total Issues:/{print $NF}') || total=""
-    printf '%s|%s' "${total:-?}" "$ids"
+    printf '%s|%s' "${total:-?}" "$body"
     return 0
 }
 
@@ -218,7 +220,8 @@ cmd_switch() {
 
     # ---- Phase A: pre-flight verification (read-only) ---------------------
     step "Verifying configuration (embedded/server switch, bd $(bd version 2>/dev/null | awk '{print $3}'))"
-    bd version 2>/dev/null | grep -qE '\b1\.1\.' || die "this script targets bd 1.1.x; found: $(bd version 2>&1 | head -1)"
+    local _ver; _ver=$(bd version 2>/dev/null | awk '{print $3; exit}')
+    case "$_ver" in 1.1.*) ;; *) die "this script targets bd 1.1.x; found: ${_ver:-unknown}" ;; esac
     [ "$BACKEND" = dolt ] || die "backend is '$BACKEND', expected 'dolt'"
     case "$CUR" in embedded|server) ;; *) die "unexpected current dolt_mode: '$CUR'";; esac
 
@@ -283,6 +286,9 @@ cmd_switch() {
     # ---- Phase D: transfer state into the new data dir (no bd init) -------
     step "Transferring database into $TGT data directory"
     mkdir -p "$DST"
+    # Pre-flight allows an empty/absent target; remove it so `cp -R src dst`
+    # can't nest into an existing dir ($DST/$DB/$DB). $DB is validated; $DST is absolute.
+    rm -rf "$DST/$DB"
     if cp -R "$SRC_DIR/$DB" "$DST/$DB"; then
         info "copied $SRC_DIR/$DB -> $DST/$DB"
     else
