@@ -231,6 +231,7 @@ cmd_switch() {
     git -C "$REPO_ROOT" ls-remote origin refs/dolt/data 2>/dev/null | grep -q . \
         || die "remote has no refs/dolt/data ref — run a 'bd dolt push' / beads-config-audit first"
 
+    # shellcheck disable=SC2015  # intentional guard: die unless the dry-run succeeds AND reports a match
     bd migrate --dry-run >/dev/null 2>&1 && bd migrate --dry-run 2>&1 | grep -q 'Version matches' \
         || die "schema does not match this bd binary (pending migration) — resolve before switching"
 
@@ -289,12 +290,12 @@ cmd_switch() {
     mkdir -p "$DST"
     # Pre-flight allows an empty/absent target; remove it so `cp -R src dst`
     # can't nest into an existing dir ($DST/$DB/$DB). $DB is validated; $DST is absolute.
-    rm -rf "$DST/$DB"
+    rm -rf "${DST:?}/${DB:?}"
     if cp -R "$SRC_DIR/$DB" "$DST/$DB"; then
         info "copied $SRC_DIR/$DB -> $DST/$DB"
     else
         warn "direct copy failed; falling back to 'bd bootstrap' from remote"
-        rm -rf "$DST/$DB"
+        rm -rf "${DST:?}/${DB:?}"
         transfer_via_bootstrap
     fi
 
@@ -313,7 +314,7 @@ cmd_switch() {
         # give the copy path one more chance via bootstrap before failing
         warn "issue set differs after copy (before=[$BEFORE] after=[$AFTER]); retrying via bootstrap"
         if [ "$TGT" = server ]; then bd dolt stop --force >/dev/null 2>&1 || true; STARTED_SERVER=0; fi
-        rm -rf "$DST/$DB"
+        rm -rf "${DST:?}/${DB:?}"
         export BEADS_DOLT_AUTO_START=0
         transfer_via_bootstrap
         unset BEADS_DOLT_AUTO_START
@@ -327,7 +328,7 @@ cmd_switch() {
     # ---- Phase F: finalize ------------------------------------------------
     SUCCESS=1
     step "Cleaning up"
-    rm -rf "$SRC_DIR"                      # remove the now-unused old-mode data dir
+    rm -rf "${SRC_DIR:?}"                  # remove the now-unused old-mode data dir
     info "removed old data dir: $SRC_DIR"
     if [ "$TGT" = embedded ]; then        # drop stale server runtime files
         rm -f "$BEADS_DIR"/dolt-server.* "$BEADS_DIR"/bd.sock "$BEADS_DIR"/bd.sock.startlock 2>/dev/null || true

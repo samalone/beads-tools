@@ -229,11 +229,11 @@ head_ "Git hooks"
 # 6. Verify
 # ---------------------------------------------------------------------------
 head_ "Verify"
-bd -C "$REPO_ROOT" list >/dev/null 2>&1 && ok "bd list works" || warn "bd list failed"
-bd -C "$REPO_ROOT" vc status >/dev/null 2>&1 && ok "bd vc status works" || warn "bd vc status failed"
+if bd -C "$REPO_ROOT" list >/dev/null 2>&1; then ok "bd list works"; else warn "bd list failed"; fi
+if bd -C "$REPO_ROOT" vc status >/dev/null 2>&1; then ok "bd vc status works"; else warn "bd vc status failed"; fi
 # gitignore assertions for the DB dir, credential, legacy db (ensured above)
 for pat in "$data_base/" ".beads-credential-key" "*.db"; do
-    grep -qF "$pat" "$gi" 2>/dev/null && ok "gitignored: $pat" || warn "not gitignored: $pat (check $gi)"
+    if grep -qF "$pat" "$gi" 2>/dev/null; then ok "gitignored: $pat"; else warn "not gitignored: $pat (check $gi)"; fi
 done
 # capture-then-test avoids a pipefail/SIGPIPE inversion that could mis-report a
 # tracked DB dir as untracked (grep -q exits early -> git dies -> pipeline fails)
