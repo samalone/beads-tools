@@ -82,11 +82,17 @@ ensure_block() {
         chmod +x "$file"
     fi
     tmp="$file.bdt.$$"
-    strip_block "$file" > "$tmp"
-    # Ensure trailing newline before appending our block.
-    [ -s "$tmp" ] && [ "$(tail -c1 "$tmp")" != "" ] && printf '\n' >> "$tmp"
+    # strip our old block, then trim trailing blank lines so reinstalls are
+    # byte-idempotent (otherwise a blank line accumulates before the block each run)
+    strip_block "$file" | awk '
+        { buf[NR]=$0 }
+        END { last=NR; while (last>0 && buf[last] ~ /^[[:space:]]*$/) last--;
+              for (i=1;i<=last;i++) print buf[i] }
+    ' > "$tmp"
     {
-        printf '\n%s\n' "$BEGIN_MARK"
+        # single blank separator line before our block (only if the file is non-empty)
+        [ -s "$tmp" ] && printf '\n'
+        printf '%s\n' "$BEGIN_MARK"
         "$body_fn"
         printf '%s\n' "$END_MARK"
     } >> "$tmp"

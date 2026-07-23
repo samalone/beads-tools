@@ -50,36 +50,38 @@ SAVED_CFG=""         # backup copy of config.yaml   (for rollback)
 BACKUP=""            # temp backup dir of the source data dir
 DST_DIR=""           # target-mode data dir (removed on rollback)
 STARTED_SERVER=0     # we started a target-mode server (stop on rollback)
+STOPPED_SERVER=0     # we stopped the source-mode server (restart on rollback)
 CUR=""               # current mode (set once metadata is read)
 
 cleanup_trap() {
     local rc=$?
-    if [ "$SUCCESS" = 1 ] || [ "$MUTATED" = 0 ]; then
+    set +e            # never let a failing recovery step abort the rest of rollback
+    [ "$SUCCESS" = 1 ] && exit "$rc"
+    if [ "$MUTATED" = 0 ]; then
+        # Nothing on-disk changed yet; the only thing to undo is a server we
+        # stopped in Phase B before mutating (e.g. backup cp failed).
+        [ "$STOPPED_SERVER" = 1 ] && [ "$CUR" = server ] && bd dolt start >/dev/null 2>&1
         exit "$rc"
     fi
     warn "switch failed (exit $rc) — rolling back to '$CUR' mode"
     # Stop a target-mode server we may have started.
-    if [ "$STARTED_SERVER" = 1 ]; then
-        bd dolt stop --force >/dev/null 2>&1 || true
-    fi
+    [ "$STARTED_SERVER" = 1 ] && bd dolt stop --force >/dev/null 2>&1
     # Restore the config files we edited.
-    if [ -n "$SAVED_META" ] && [ -f "$SAVED_META" ]; then cp "$SAVED_META" "$META"; fi
-    if [ -n "$SAVED_CFG"  ] && [ -f "$SAVED_CFG"  ]; then cp "$SAVED_CFG"  "$CFG";  fi
+    [ -n "$SAVED_META" ] && [ -f "$SAVED_META" ] && cp "$SAVED_META" "$META"
+    [ -n "$SAVED_CFG"  ] && [ -f "$SAVED_CFG"  ] && cp "$SAVED_CFG"  "$CFG"
     # Remove any partially-written target data dir.
-    if [ -n "$DST_DIR" ] && [ -d "$DST_DIR" ]; then rm -rf "$DST_DIR"; fi
+    [ -n "$DST_DIR" ] && [ -d "$DST_DIR" ] && rm -rf "$DST_DIR"
     # Make sure the original data dir is intact; restore from backup if needed.
     if [ -n "$BACKUP" ] && [ -d "$BACKUP" ]; then
         local src_dir; src_dir=$(data_dir_for "$CUR")
         if [ ! -d "$src_dir/$DB" ]; then
             mkdir -p "$src_dir"
             cp -R "$BACKUP/$(basename "$src_dir")/$DB" "$src_dir/$DB" 2>/dev/null || \
-            cp -R "$BACKUP/"*/"$DB" "$src_dir/$DB" 2>/dev/null || true
+            cp -R "$BACKUP/"*/"$DB" "$src_dir/$DB" 2>/dev/null
         fi
     fi
     # If we were in server mode, bring the server back up.
-    if [ "$CUR" = server ]; then
-        bd dolt start >/dev/null 2>&1 || true
-    fi
+    [ "$CUR" = server ] && bd dolt start >/dev/null 2>&1
     warn "rolled back to '$CUR' mode. Temporary backup preserved at: ${BACKUP:-<none>}"
     exit "$rc"
 }
@@ -117,6 +119,14 @@ BACKEND=$(meta_get backend)
 DB=$(meta_get dolt_database)
 CUR=$(meta_get dolt_mode)
 
+# The database name is interpolated into data-dir paths (cp/rm -rf); refuse
+# anything that isn't a plain identifier so an empty/crafted value can't make a
+# later `rm -rf "$DST/$DB"` escape the beads dir.
+[ -n "$DB" ] || die "metadata.json: dolt_database is empty"
+case "$DB" in
+    *[!A-Za-z0-9._-]*|*..*) die "metadata.json: dolt_database '$DB' has unexpected characters" ;;
+esac
+
 # data_dir_for <mode> -> absolute path of that mode's Dolt data directory
 data_dir_for() {
     case "$1" in
@@ -126,8 +136,10 @@ data_dir_for() {
     esac
 }
 
-sync_remote() { git -C "$REPO_ROOT" config --get-regexp '^remote\.origin\.url' >/dev/null 2>&1 && \
-                awk -F'"' '/^sync\.remote:/{print $2}' "$CFG"; }
+# Read sync.remote from config.yaml, tolerating quoted or unquoted values.
+sync_remote() {
+    sed -n -E 's/^sync\.remote:[[:space:]]*"?([^"]*[^"[:space:]])"?[[:space:]]*$/\1/p' "$CFG" 2>/dev/null | head -n1
+}
 
 # ---------------------------------------------------------------------------
 # fingerprint (for the pre/post equivalence check)
@@ -144,16 +156,31 @@ fingerprint() {
 # config editors (deterministic; avoid buggy `bd config set` on nested YAML)
 # ---------------------------------------------------------------------------
 set_dolt_mode() {   # $1 = embedded|server ; preserves bd's no-trailing-newline format
-    printf '%s' "$(jq --arg m "$1" '.dolt_mode=$m' "$META")" > "$META.tmp$$"
-    mv "$META.tmp$$" "$META"
+    local out
+    out=$(jq --arg m "$1" '.dolt_mode=$m' "$META") || die "jq failed rewriting $META"
+    printf '%s' "$out" > "$META.tmp$$" && mv "$META.tmp$$" "$META"
 }
 
-set_auto_push() {   # $1 = true|false ; edit the single auto-push line under dolt:
-    if grep -qE '^[[:space:]]*auto-push:' "$CFG"; then
-        sed -i '' -E "s/^([[:space:]]*auto-push:[[:space:]]*).*/\1$1/" "$CFG"
-    else
-        warn "no 'auto-push:' line in config.yaml; leaving dolt.auto-push unchanged"
-    fi
+# Normalize dolt.auto-push to a single flat "dolt.auto-push: <val>" line — the
+# same representation beads-config-audit.sh writes. Portable (no `sed -i`), and
+# verified via `bd config get` since this is a durability-critical setting.
+set_auto_push() {   # $1 = true|false
+    local tmp="$CFG.tmp$$"
+    # drop any existing representation (flat dotted OR nested child)
+    awk '!/^dolt\.auto-push:/ && !/^[[:space:]]+auto-push:/' "$CFG" > "$tmp"
+    # drop a now-childless "dolt:" header left behind
+    awk '{a[NR]=$0}
+         END{for(i=1;i<=NR;i++){
+                 if(a[i]~/^dolt:[[:space:]]*$/){nx=(i<NR)?a[i+1]:""; if(nx!~/^[[:space:]]/)continue}
+                 print a[i]}}' "$tmp" > "$tmp.2" && mv "$tmp.2" "$tmp"
+    [ -s "$tmp" ] && [ "$(tail -c1 "$tmp")" != "" ] && printf '\n' >> "$tmp"
+    printf 'dolt.auto-push: %s\n' "$1" >> "$tmp"
+    mv "$tmp" "$CFG"
+    # Verify at the file level: exactly one flat line with the intended value.
+    # (Not via `bd config get` — this runs mid-switch when dolt_mode is already
+    # flipped and bd's store isn't readable yet.)
+    { [ "$(grep -cE '^dolt\.auto-push:' "$CFG")" = 1 ] && grep -qxF "dolt.auto-push: $1" "$CFG"; } \
+        || die "failed to set dolt.auto-push=$1 (check $CFG)"
 }
 
 # ===========================================================================
@@ -224,6 +251,7 @@ cmd_switch() {
 
     if [ "$CUR" = server ]; then
         step "Stopping the project server to quiesce the database"
+        STOPPED_SERVER=1   # so rollback restarts it even if we fail before MUTATED
         bd dolt stop >/dev/null 2>&1 || true
         sleep 1
         bd dolt status 2>/dev/null | grep -q 'not running' || bd dolt stop --force >/dev/null 2>&1 || true

@@ -104,10 +104,19 @@ ensure_config() {
     local key="$1" val="$2" leaf="${1##*.}" ns="${1%.*}" tmp
     [ -f "$CFG" ] || printf '' > "$CFG"
     tmp="$CFG.bdt.$$"
-    # Drop every flat form and nested-leaf form, then drop a now-empty ns header.
-    awk -v key="$key" -v leaf="$leaf" '
-        $0 ~ "^"key":"            { next }
-        $0 ~ "^[[:space:]]+"leaf":" { next }
+    # Drop every flat form and (only-under-the-right-parent) nested-leaf form,
+    # then drop a now-empty ns header. keyre escapes regex metachars in the key
+    # so the dot in e.g. "dolt.auto-push" is literal, and section tracking makes
+    # the nested-leaf removal parent-aware (won't touch a same-named leaf under
+    # a different block).
+    local keyre; keyre=$(printf '%s' "$key" | sed 's/[][(){}.^$*+?|\\]/\\&/g')
+    awk -v keyre="$keyre" -v leaf="$leaf" -v ns="$ns" '
+        /^[^[:space:]#]/ {
+            if ($0 ~ /^[A-Za-z0-9_.-]+:[[:space:]]*$/) { cur=$0; sub(/:.*/,"",cur) }
+            else { cur="" }
+        }
+        $0 ~ "^" keyre ":"                          { next }
+        ($0 ~ "^[[:space:]]+" leaf ":") && cur==ns  { next }
         { print }
     ' "$CFG" | awk -v ns="$ns" '
         { lines[NR]=$0 }
@@ -145,7 +154,7 @@ else
     ORIGIN=$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)
     [ -n "$ORIGIN" ] || gate 15 "no dolt remote and no git 'origin' — cannot establish durability; leaving config untouched"
     bd -C "$REPO_ROOT" dolt remote add origin "$ORIGIN" >/dev/null 2>&1 || die "failed to add dolt remote"
-    ok "added dolt remote origin -> $ORIGIN"
+    ok "added dolt remote origin -> $(printf '%s' "$ORIGIN" | sed -E 's#://[^/@]*@#://***@#')"
 fi
 bd -C "$REPO_ROOT" dolt commit -m "beads-config-audit: pre-push" >/dev/null 2>&1 || true
 if ! bd -C "$REPO_ROOT" dolt push >/dev/null 2>&1; then
@@ -187,6 +196,21 @@ if git -C "$REPO_ROOT" ls-files --error-unmatch .beads/interactions.jsonl >/dev/
 fi
 add_ignore "interactions.jsonl"
 
+# The Dolt DB dir, the machine credential key, and legacy *.db must NEVER be
+# committed. Ensure they're ignored BEFORE the `git add -A` below, so a repair
+# on a mis-configured project can't stage/commit (and then push) a secret.
+data_base=$(basename "$DATA_DIR")
+add_ignore "$data_base/"
+add_ignore ".beads-credential-key"
+add_ignore "*.db"
+# If any are somehow already tracked, untrack them (keep on disk) so the commit
+# removes them from the index rather than leaving a secret in history.
+for p in ".beads/$data_base" ".beads/.beads-credential-key"; do
+    if git -C "$REPO_ROOT" ls-files --error-unmatch "$p" >/dev/null 2>&1; then
+        git -C "$REPO_ROOT" rm -q -r --cached "$p"; warn "untracked previously-committed $p"
+    fi
+done
+
 # ---------------------------------------------------------------------------
 # 5. Install git hooks (sync Dolt on push/pull) — mode-independent
 # ---------------------------------------------------------------------------
@@ -197,14 +221,19 @@ head_ "Git hooks"
 # 6. Verify
 # ---------------------------------------------------------------------------
 head_ "Verify"
-bd -C "$REPO_ROOT" list >/dev/null 2>&1 && ok "bd list works"
-bd -C "$REPO_ROOT" vc status >/dev/null 2>&1 && ok "bd vc status works"
-# gitignore assertions for the DB dir, credential, legacy db
-data_base=$(basename "$DATA_DIR")
+bd -C "$REPO_ROOT" list >/dev/null 2>&1 && ok "bd list works" || warn "bd list failed"
+bd -C "$REPO_ROOT" vc status >/dev/null 2>&1 && ok "bd vc status works" || warn "bd vc status failed"
+# gitignore assertions for the DB dir, credential, legacy db (ensured above)
 for pat in "$data_base/" ".beads-credential-key" "*.db"; do
     grep -qF "$pat" "$gi" 2>/dev/null && ok "gitignored: $pat" || warn "not gitignored: $pat (check $gi)"
 done
-git -C "$REPO_ROOT" ls-files "$DATA_DIR" 2>/dev/null | grep -q . && warn "DB dir is TRACKED — must not be committed" || ok "DB dir not tracked"
+# capture-then-test avoids a pipefail/SIGPIPE inversion that could mis-report a
+# tracked DB dir as untracked (grep -q exits early -> git dies -> pipeline fails)
+if [ -n "$(git -C "$REPO_ROOT" ls-files "$DATA_DIR" 2>/dev/null | head -n1)" ]; then
+    warn "DB dir is TRACKED — must not be committed"
+else
+    ok "DB dir not tracked"
+fi
 
 # ---------------------------------------------------------------------------
 # 7. Commit the audit changes (no branch push)
