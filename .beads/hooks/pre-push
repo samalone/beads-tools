@@ -1,0 +1,60 @@
+#!/usr/bin/env sh
+# --- BEGIN BEADS INTEGRATION v1.1.0 ---
+# This section is managed by beads. Do not remove these markers.
+if command -v bd >/dev/null 2>&1; then
+  export BD_GIT_HOOK=1
+  _bd_timeout=${BEADS_HOOK_TIMEOUT:-300}
+  _bd_used_perl=0
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$_bd_timeout" bd hooks run pre-push "$@"
+    _bd_exit=$?
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$_bd_timeout" bd hooks run pre-push "$@"
+    _bd_exit=$?
+  elif command -v perl >/dev/null 2>&1; then
+    _bd_used_perl=1
+    perl -e 'alarm shift; exec @ARGV' "$_bd_timeout" bd hooks run pre-push "$@"
+    _bd_exit=$?
+  else
+    echo >&2 "beads: hook 'pre-push' running without timeout; install coreutils or perl to enable BEADS_HOOK_TIMEOUT"
+    bd hooks run pre-push "$@"
+    _bd_exit=$?
+  fi
+  if [ $_bd_exit -eq 124 ] || { [ $_bd_used_perl -eq 1 ] && [ $_bd_exit -eq 142 ]; }; then
+    echo >&2 "beads: hook 'pre-push' timed out after ${_bd_timeout}s — continuing without beads"
+    _bd_exit=0
+  fi
+  if [ $_bd_exit -eq 3 ]; then
+    echo >&2 "beads: database not initialized — skipping hook 'pre-push'"
+    _bd_exit=0
+  fi
+  if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
+fi
+# --- END BEADS INTEGRATION v1.1.0 ---
+
+# --- BEGIN BEADS-TOOLS SYNC (managed by beads-tools; edits here are overwritten) ---
+# Sync Beads Dolt data to the remote whenever code is pushed to origin.
+# Non-blocking by policy: this section never fails a git push.
+if command -v bd >/dev/null 2>&1; then
+  case "${1:-origin}" in
+    origin|"")
+      _bdt_to=${BEADS_HOOK_TIMEOUT:-120}
+      # Bound every Dolt call so a stalled remote can never hang git. Falls back
+      # to perl's alarm; if no timeout mechanism exists at all, skip (return 124)
+      # rather than run unbounded.
+      _bdt() {
+        if command -v timeout >/dev/null 2>&1; then timeout "$_bdt_to" "$@"
+        elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$_bdt_to" "$@"
+        elif command -v perl >/dev/null 2>&1; then perl -e 'alarm shift; exec @ARGV' "$_bdt_to" "$@"
+        else echo "beads-tools: no timeout helper; skipping Dolt sync" >&2; return 124; fi
+      }
+      _bdt bd dolt commit -m "beads-tools: pre-push sync" >/dev/null 2>&1 || true
+      if _bdt bd dolt push >/dev/null 2>&1; then
+        echo "beads-tools: pushed Dolt issue data (refs/dolt/data)" >&2
+      else
+        echo "beads-tools: 'bd dolt push' skipped/failed — continuing with git push" >&2
+      fi
+      ;;
+  esac
+fi
+# --- END BEADS-TOOLS SYNC ---
