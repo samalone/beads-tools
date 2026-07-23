@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env sh
 #
 # SessionStart hook: inject the shared beads / PR-workflow guidance, but only in
 # projects that actually use beads. Detection = a .beads/ directory found while
@@ -12,7 +12,7 @@
 # SessionStart hooks add their stdout to the session context (same mechanism as
 # `bd prime`), so emitting the file contents is all that's needed.
 
-set -euo pipefail
+set -eu
 
 # Drain the hook JSON on stdin so the parent never blocks on a full pipe.
 cat >/dev/null 2>&1 || true

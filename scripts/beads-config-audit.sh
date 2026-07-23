@@ -52,6 +52,9 @@ SELF_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # ---------------------------------------------------------------------------
 head_ "Identify"
 [ -n "$PROJECT" ] || PROJECT="$PWD"
+# Canonicalize to an absolute path: BEADS_DIR/META/CFG are derived from it and
+# must stay valid after we `cd "$REPO_ROOT"` below (a relative arg would break).
+PROJECT=$(cd "$PROJECT" 2>/dev/null && pwd) || die "cannot resolve project directory: $PROJECT"
 BEADS_DIR="$PROJECT/.beads"
 [ -d "$BEADS_DIR" ] || gate 10 "no .beads directory under $PROJECT"
 REPO_ROOT=$(git -C "$PROJECT" rev-parse --show-toplevel 2>/dev/null) || die "not a git repository: $PROJECT"
@@ -80,7 +83,12 @@ head_ "Schema"
 if bd -C "$REPO_ROOT" migrate --dry-run 2>&1 | grep -q 'Version matches'; then
     ok "schema matches bd $VER"
 else
-    if [ "$ALLOW_MIGRATE" = 1 ] && ! bd -C "$REPO_ROOT" dolt remote list 2>/dev/null | grep -qiv 'no remotes'; then
+    # Positively confirm "no remote" before auto-migrating: a FAILED remote
+    # lookup must NOT be read as "no remote" (that would migrate a possibly
+    # remote-backed DB). Only the explicit "no remotes" text counts.
+    _rl=$(bd -C "$REPO_ROOT" dolt remote list 2>/dev/null) || _rl=""
+    _no_remote=0; printf '%s' "$_rl" | grep -qi 'no remotes' && _no_remote=1
+    if [ "$ALLOW_MIGRATE" = 1 ] && [ "$_no_remote" = 1 ]; then
         warn "pending migration, no remote, --allow-migrate set → backing up and migrating"
         bd -C "$REPO_ROOT" backup >/dev/null 2>&1 || warn "bd backup returned non-zero"
         bd -C "$REPO_ROOT" migrate >/dev/null 2>&1 || gate 13 "migration failed — inspect manually"
@@ -134,7 +142,7 @@ ensure_config() {
     # ensure trailing newline, then append the single flat form
     [ -s "$tmp" ] && [ "$(tail -c1 "$tmp")" != "" ] && printf '\n' >> "$tmp"
     printf '%s: %s\n' "$key" "$val" >> "$tmp"
-    mv "$tmp" "$CFG"
+    mv -f "$tmp" "$CFG"
     # verify: bd agrees AND exactly one representation remains
     local got cnt; got=$(bd -C "$REPO_ROOT" config get "$key" 2>/dev/null || true)
     cnt=$(config_count "$key")
@@ -240,10 +248,12 @@ fi
 # ---------------------------------------------------------------------------
 if [ "$DO_COMMIT" = 1 ]; then
     git -C "$REPO_ROOT" add -A -- .beads .gitignore 2>/dev/null || true
-    if git -C "$REPO_ROOT" diff --cached --quiet 2>/dev/null; then
+    # Scope both the check and the commit to our paths, so a pre-existing staged
+    # index (unrelated work) is neither counted nor swept into this commit.
+    if git -C "$REPO_ROOT" diff --cached --quiet -- .beads .gitignore 2>/dev/null; then
         ok "no changes to commit"
     else
-        git -C "$REPO_ROOT" commit -q -m "beads-config-audit: normalize config, hooks, and gitignore"
+        git -C "$REPO_ROOT" commit -q -m "beads-config-audit: normalize config, hooks, and gitignore" -- .beads .gitignore
         ok "committed audit changes"
     fi
 fi

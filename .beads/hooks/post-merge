@@ -36,9 +36,14 @@ fi
 # Refresh Beads Dolt data from the remote after a git pull/merge. Non-blocking.
 if command -v bd >/dev/null 2>&1; then
   _bdt_to=${BEADS_HOOK_TIMEOUT:-120}
-  _bdt() { if command -v timeout >/dev/null 2>&1; then timeout "$_bdt_to" "$@";
-           elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$_bdt_to" "$@";
-           else "$@"; fi; }
+  # Bound the pull so a stalled remote can never hang git; skip if no timeout
+  # mechanism exists rather than run unbounded.
+  _bdt() {
+    if command -v timeout >/dev/null 2>&1; then timeout "$_bdt_to" "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$_bdt_to" "$@"
+    elif command -v perl >/dev/null 2>&1; then perl -e 'alarm shift; exec @ARGV' "$_bdt_to" "$@"
+    else echo "beads-tools: no timeout helper; skipping Dolt sync" >&2; return 124; fi
+  }
   if _bdt bd dolt pull >/dev/null 2>&1; then
     echo "beads-tools: pulled Dolt issue data (refs/dolt/data)" >&2
   else

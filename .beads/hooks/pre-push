@@ -39,10 +39,16 @@ if command -v bd >/dev/null 2>&1; then
   case "${1:-origin}" in
     origin|"")
       _bdt_to=${BEADS_HOOK_TIMEOUT:-120}
-      _bdt() { if command -v timeout >/dev/null 2>&1; then timeout "$_bdt_to" "$@";
-               elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$_bdt_to" "$@";
-               else "$@"; fi; }
-      bd dolt commit -m "beads-tools: pre-push sync" >/dev/null 2>&1 || true
+      # Bound every Dolt call so a stalled remote can never hang git. Falls back
+      # to perl's alarm; if no timeout mechanism exists at all, skip (return 124)
+      # rather than run unbounded.
+      _bdt() {
+        if command -v timeout >/dev/null 2>&1; then timeout "$_bdt_to" "$@"
+        elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$_bdt_to" "$@"
+        elif command -v perl >/dev/null 2>&1; then perl -e 'alarm shift; exec @ARGV' "$_bdt_to" "$@"
+        else echo "beads-tools: no timeout helper; skipping Dolt sync" >&2; return 124; fi
+      }
+      _bdt bd dolt commit -m "beads-tools: pre-push sync" >/dev/null 2>&1 || true
       if _bdt bd dolt push >/dev/null 2>&1; then
         echo "beads-tools: pushed Dolt issue data (refs/dolt/data)" >&2
       else

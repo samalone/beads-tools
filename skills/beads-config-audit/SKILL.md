@@ -23,7 +23,7 @@ ordering) while reserving your expertise for the parts that actually need it.
 
 ## Run the script
 
-```
+```sh
 ${CLAUDE_PLUGIN_ROOT}/scripts/beads-config-audit.sh [--allow-migrate] [--no-commit] [project-dir]
 ```
 

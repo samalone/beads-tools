@@ -146,10 +146,13 @@ sync_remote() {
 # ---------------------------------------------------------------------------
 fingerprint() {
     # sorted issue IDs + total count; stable across a byte-identical copy.
+    # Guarded so a transient bd hiccup (pipefail) can't abort the switch —
+    # especially the post-switch call, where it would trigger a needless rollback.
     local ids total
-    ids=$(bd list --json 2>/dev/null | jq -r '.[].id' | sort | tr '\n' ',')
-    total=$(bd stats 2>/dev/null | awk '/Total Issues:/{print $NF}')
+    ids=$(bd list --json 2>/dev/null | jq -r '.[].id' 2>/dev/null | sort | tr '\n' ',') || ids=""
+    total=$(bd stats 2>/dev/null | awk '/Total Issues:/{print $NF}') || total=""
     printf '%s|%s' "${total:-?}" "$ids"
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -158,7 +161,7 @@ fingerprint() {
 set_dolt_mode() {   # $1 = embedded|server ; preserves bd's no-trailing-newline format
     local out
     out=$(jq --arg m "$1" '.dolt_mode=$m' "$META") || die "jq failed rewriting $META"
-    printf '%s' "$out" > "$META.tmp$$" && mv "$META.tmp$$" "$META"
+    printf '%s' "$out" > "$META.tmp$$" && mv -f "$META.tmp$$" "$META"
 }
 
 # Normalize dolt.auto-push to a single flat "dolt.auto-push: <val>" line — the
@@ -172,10 +175,10 @@ set_auto_push() {   # $1 = true|false
     awk '{a[NR]=$0}
          END{for(i=1;i<=NR;i++){
                  if(a[i]~/^dolt:[[:space:]]*$/){nx=(i<NR)?a[i+1]:""; if(nx!~/^[[:space:]]/)continue}
-                 print a[i]}}' "$tmp" > "$tmp.2" && mv "$tmp.2" "$tmp"
+                 print a[i]}}' "$tmp" > "$tmp.2" && mv -f "$tmp.2" "$tmp"
     [ -s "$tmp" ] && [ "$(tail -c1 "$tmp")" != "" ] && printf '\n' >> "$tmp"
     printf 'dolt.auto-push: %s\n' "$1" >> "$tmp"
-    mv "$tmp" "$CFG"
+    mv -f "$tmp" "$CFG"
     # Verify at the file level: exactly one flat line with the intended value.
     # (Not via `bd config get` — this runs mid-switch when dolt_mode is already
     # flipped and bd's store isn't readable yet.)

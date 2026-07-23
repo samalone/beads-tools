@@ -22,7 +22,7 @@ is not the place to run the plugin against other projects.
 
 ## Layout
 
-```
+```text
 .claude-plugin/plugin.json      plugin manifest (name, version, $schema)
 bin/bd-mode                     CLI: switch a beads project embedded <-> server mode
 scripts/beads-config-audit.sh   deterministic audit/repair to my Dolt preferences (gated)
@@ -87,11 +87,14 @@ git push/pull (auto-push is intentionally off in server mode).
 
 ## Git / PR workflow
 
-My global `~/.claude/CLAUDE.md` governs this: commit freely, **don't push `main`
-without permission**, open PRs only when asked, assign `samalone`, run
-`~/.claude/scripts/poll-pr-reviews.sh` for AI reviews, review to convergence, and
-merge with a plain `--merge` commit. Versioning tracks `main` (no version bumps
-needed to ship); bump `plugin.json` `version` only for a deliberate release.
+My global `~/.claude/CLAUDE.md` is authoritative and — per the managed Beads
+block's own rule that explicit user instructions override it — takes precedence
+over that block here. Under it: committing without asking is permitted, but
+**never push `main` without permission**, open PRs only when asked, assign
+`samalone`, run `~/.claude/scripts/poll-pr-reviews.sh` for AI reviews, review to
+convergence, and merge with a plain `--merge` commit. Versioning tracks `main`
+(no version bumps needed to ship); bump `plugin.json` `version` only for a
+deliberate release.
 
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->

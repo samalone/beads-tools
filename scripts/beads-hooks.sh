@@ -31,10 +31,16 @@ if command -v bd >/dev/null 2>&1; then
   case "${1:-origin}" in
     origin|"")
       _bdt_to=${BEADS_HOOK_TIMEOUT:-120}
-      _bdt() { if command -v timeout >/dev/null 2>&1; then timeout "$_bdt_to" "$@";
-               elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$_bdt_to" "$@";
-               else "$@"; fi; }
-      bd dolt commit -m "beads-tools: pre-push sync" >/dev/null 2>&1 || true
+      # Bound every Dolt call so a stalled remote can never hang git. Falls back
+      # to perl's alarm; if no timeout mechanism exists at all, skip (return 124)
+      # rather than run unbounded.
+      _bdt() {
+        if command -v timeout >/dev/null 2>&1; then timeout "$_bdt_to" "$@"
+        elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$_bdt_to" "$@"
+        elif command -v perl >/dev/null 2>&1; then perl -e 'alarm shift; exec @ARGV' "$_bdt_to" "$@"
+        else echo "beads-tools: no timeout helper; skipping Dolt sync" >&2; return 124; fi
+      }
+      _bdt bd dolt commit -m "beads-tools: pre-push sync" >/dev/null 2>&1 || true
       if _bdt bd dolt push >/dev/null 2>&1; then
         echo "beads-tools: pushed Dolt issue data (refs/dolt/data)" >&2
       else
@@ -51,9 +57,14 @@ post_merge_body() {
 # Refresh Beads Dolt data from the remote after a git pull/merge. Non-blocking.
 if command -v bd >/dev/null 2>&1; then
   _bdt_to=${BEADS_HOOK_TIMEOUT:-120}
-  _bdt() { if command -v timeout >/dev/null 2>&1; then timeout "$_bdt_to" "$@";
-           elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$_bdt_to" "$@";
-           else "$@"; fi; }
+  # Bound the pull so a stalled remote can never hang git; skip if no timeout
+  # mechanism exists rather than run unbounded.
+  _bdt() {
+    if command -v timeout >/dev/null 2>&1; then timeout "$_bdt_to" "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$_bdt_to" "$@"
+    elif command -v perl >/dev/null 2>&1; then perl -e 'alarm shift; exec @ARGV' "$_bdt_to" "$@"
+    else echo "beads-tools: no timeout helper; skipping Dolt sync" >&2; return 124; fi
+  }
   if _bdt bd dolt pull >/dev/null 2>&1; then
     echo "beads-tools: pulled Dolt issue data (refs/dolt/data)" >&2
   else
@@ -81,6 +92,12 @@ ensure_block() {
         printf '#!/usr/bin/env sh\n' > "$file"
         chmod +x "$file"
     fi
+    # Refuse to rewrite a file with unbalanced markers — stripping a lone BEGIN
+    # would delete everything after it and silently truncate the hook.
+    local nb ne
+    nb=$(grep -c '^# --- BEGIN BEADS-TOOLS SYNC' "$file" 2>/dev/null || true)
+    ne=$(grep -c '^# --- END BEADS-TOOLS SYNC'   "$file" 2>/dev/null || true)
+    [ "${nb:-0}" = "${ne:-0}" ] || die "unbalanced beads-tools markers in $file (begin=$nb end=$ne) — fix by hand"
     tmp="$file.bdt.$$"
     # strip our old block, then trim trailing blank lines so reinstalls are
     # byte-idempotent (otherwise a blank line accumulates before the block each run)
@@ -96,7 +113,7 @@ ensure_block() {
         "$body_fn"
         printf '%s\n' "$END_MARK"
     } >> "$tmp"
-    mv "$tmp" "$file"
+    mv -f "$tmp" "$file"
     chmod +x "$file"
 }
 
