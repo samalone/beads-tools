@@ -53,13 +53,16 @@ the [bats](https://github.com/bats-core/bats-core) suite on macOS **and** Linux
 for every PR. To run the same checks locally (tools via Homebrew):
 
 ```bash
-brew install bats-core shellcheck            # bd 1.1.x must already be installed
+brew install bats-core shellcheck jq         # bd 1.1.x must already be installed
 
 # manifest / hooks / frontmatter (non-strict: the intentional plugin-root
 # CLAUDE.md warning makes --strict fail — see the CI allowlist)
 claude plugin validate ./
 
-shellcheck bin/bd-mode scripts/*.sh          # + `-s sh` for inject-beads-workflow.sh
+bash -n bin/bd-mode scripts/beads-config-audit.sh scripts/beads-hooks.sh
+sh -n scripts/inject-beads-workflow.sh
+shellcheck bin/bd-mode scripts/beads-config-audit.sh scripts/beads-hooks.sh
+shellcheck -s sh scripts/inject-beads-workflow.sh
 bats test/                                    # ~3 min; spins real bd + Dolt in throwaway fixtures
 ```
 

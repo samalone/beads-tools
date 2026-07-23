@@ -75,9 +75,10 @@ teardown() {
     run bash -c "cd '$PROJECT' && env -u BEADS_DOLT_AUTO_START '$BD_MODE' embedded"
     [ "$status" -ne 0 ]
     [ "$(meta dolt_mode)" = server ]                           # rolled back to server
-    # the source server was stopped to quiesce, then brought back up on rollback
+    # the source server was stopped to quiesce, then brought back up on rollback.
+    # Exclude the "not running" substring so a down server can't pass this.
     run bd -C "$PROJECT" dolt status
-    [[ "$output" == *"running"* ]]
+    [[ "$output" == *"running"* && "$output" != *"not running"* ]]
 }
 
 # --- guards -----------------------------------------------------------------

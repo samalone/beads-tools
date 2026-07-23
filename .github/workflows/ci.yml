@@ -27,8 +27,10 @@ jobs:
       - uses: actions/checkout@v4
 
       # Homebrew on both legs (beads is in homebrew/core; matches local setup).
+      # Pinned to a commit SHA (the action publishes no tags) for supply-chain
+      # safety; bump deliberately.
       - name: Set up Homebrew
-        uses: Homebrew/actions/setup-homebrew@master
+        uses: Homebrew/actions/setup-homebrew@df4b09108a1de9d6f995fe68f302b3f68bd6d2ef
 
       - name: Install bd, bats-core, shellcheck
         run: brew install beads bats-core shellcheck
@@ -48,7 +50,9 @@ jobs:
           node-version: 20
 
       - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code
+        # Pinned version (not @latest) so a CLI release can't change validate
+        # behavior mid-stream; bump deliberately.
+        run: npm install -g @anthropic-ai/claude-code@2.1.218
 
       # Non-strict on purpose: --strict fails on the intentional plugin-root
       # CLAUDE.md ("not loaded as project context") warning. Allow exactly that

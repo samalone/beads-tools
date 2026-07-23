@@ -17,11 +17,14 @@ teardown() {
 @test "hooks: install is byte-idempotent" {
     run bash -c "'$HOOKS_SH' install '$PROJECT/.beads'"
     [ "$status" -eq 0 ]
-    local a; a="$(cat "$HD/pre-push" "$HD/post-merge")"
+    # Byte-accurate snapshot (command substitution would strip trailing newlines
+    # and hide formatting drift), compared with cmp -s after a reinstall.
+    cp "$HD/pre-push"   "$PROJECT/pre-push.before"
+    cp "$HD/post-merge" "$PROJECT/post-merge.before"
     run bash -c "'$HOOKS_SH' install '$PROJECT/.beads'"
     [ "$status" -eq 0 ]
-    local b; b="$(cat "$HD/pre-push" "$HD/post-merge")"
-    [ "$a" = "$b" ]                                          # no drift on reinstall
+    cmp -s "$PROJECT/pre-push.before"   "$HD/pre-push"       # byte-identical on reinstall
+    cmp -s "$PROJECT/post-merge.before" "$HD/post-merge"
     [ "$(grep -c 'BEGIN BEADS-TOOLS SYNC' "$HD/pre-push")" -eq 1 ]
     [ "$(grep -c 'BEGIN BEADS-TOOLS SYNC' "$HD/post-merge")" -eq 1 ]
 }
@@ -47,7 +50,7 @@ teardown() {
 
 @test "hooks: our block survives a 'bd hooks install' and stays outside beads markers" {
     bash -c "'$HOOKS_SH' install '$PROJECT/.beads'" >/dev/null
-    ( cd "$PROJECT" && bd hooks install --beads >/dev/null 2>&1 ) || true
+    ( cd "$PROJECT" && bd hooks install --beads >/dev/null 2>&1 )   # must succeed to exercise preservation
     run bash -c "'$HOOKS_SH' check '$PROJECT/.beads'"
     [ "$status" -eq 0 ]
     # if beads writes its own integration markers, ours must not be nested inside

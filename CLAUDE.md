@@ -67,14 +67,19 @@ There is **no build**. CI (`.github/workflows/ci.yml`) runs three layers on a
 macOS + Linux matrix for every PR; run them locally with:
 
 ```bash
+brew install bats-core shellcheck jq          # bd 1.1.x must already be installed
+
 # manifest / hooks / frontmatter. NON-strict on purpose: the intentional
 # plugin-root CLAUDE.md triggers a "not loaded as project context" warning that
 # makes --strict FAIL. CI allowlists exactly that one warning and fails on any
 # other, so don't add --strict here.
 claude plugin validate ./
-claude --plugin-dir ./                        # load the real layout locally, then /reload-plugins
-bash -n bin/bd-mode scripts/*.sh              # syntax (+ `sh -n` for inject-beads-workflow.sh)
-shellcheck bin/bd-mode scripts/*.sh           # lint  (+ `-s sh` for the POSIX injector)
+claude --plugin-dir ./                         # load the real layout locally, then /reload-plugins
+
+bash -n bin/bd-mode scripts/beads-config-audit.sh scripts/beads-hooks.sh   # syntax
+sh -n scripts/inject-beads-workflow.sh                                     # POSIX injector
+shellcheck bin/bd-mode scripts/beads-config-audit.sh scripts/beads-hooks.sh
+shellcheck -s sh scripts/inject-beads-workflow.sh                          # POSIX rules
 bats test/                                     # ~3 min; isolated bd + Dolt fixtures
 ```
 
@@ -82,9 +87,9 @@ The `bats` suite lives under `test/` (shared harness in `test/helpers/setup.bash
 and is fully isolated: each test builds a throwaway `bd init` project with a bare
 git origin under `$HOME` (bd rejects `/tmp`-family "unsafe" locations; override
 the base with `BD_TESTS_TMPDIR`), exercises a tool, asserts, and tears down —
-stopping only its own Dolt server, **never** a machine-wide `bd dolt killall`.
-Never exercise changes against a live repo. Install the local tools with
-`brew install bats-core shellcheck` (bd 1.1.x must already be present).
+stopping only its own Dolt server (`bd dolt killall` is project-scoped in
+standalone mode, so other projects' servers are preserved). Never exercise
+changes against a live repo. `jq` is required by the harness (`bd` needs it too).
 
 ## Beads
 
