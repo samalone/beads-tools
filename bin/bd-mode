@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+#
+# bd-mode — switch a Beads (bd) installation between "embedded" and
+#           "project server" mode, keeping the new install equivalent to the old.
+#
+#   bd-mode                report the current mode
+#   bd-mode embedded       switch to embedded mode
+#   bd-mode server         switch to project-server mode
+#
+# The mode is selected by the `dolt_mode` field in .beads/metadata.json.
+# The two modes keep their Dolt database in DIFFERENT directories
+# (embedded -> .beads/embeddeddolt/<db>, server -> .beads/dolt/<db>), so a
+# switch physically transfers the database rather than just flipping a flag.
+#
+# This script is intended for installations configured to the single-user Dolt
+# preferences enforced by the `beads-config-audit` workflow (a `refs/dolt/data`
+# remote on git origin, auto-export off, etc.) and VERIFIES that configuration
+# before changing anything. It:
+#   * ensures the remote `refs/dolt/data` ref is up to date (commit + push) first,
+#   * makes a temporary local backup of the Dolt database before any change,
+#   * transfers state by copying the Dolt data directory (never runs `bd init`),
+#     falling back to `bd bootstrap` from the remote if the copy doesn't verify,
+#   * flips `dolt.auto-push` to match the target mode (embedded=on, server=off),
+#   * rolls back to the original mode on any failure.
+#
+# Tracked files it edits (.beads/metadata.json, .beads/config.yaml) are left
+# MODIFIED BUT UNCOMMITTED — committing the mode change is left to you.
+#
+set -euo pipefail
+
+PROG=bd-mode
+
+# ---------------------------------------------------------------------------
+# output helpers
+# ---------------------------------------------------------------------------
+die()  { printf '%s: error: %s\n'   "$PROG" "$*" >&2; exit 1; }
+warn() { printf '%s: warning: %s\n' "$PROG" "$*" >&2; }
+info() { printf '%s\n' "$*"; }
+step() { printf '\n==> %s\n' "$*"; }
+
+need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
+
+# ---------------------------------------------------------------------------
+# rollback state (populated as the switch proceeds; consumed by the EXIT trap)
+# ---------------------------------------------------------------------------
+MUTATED=0            # set to 1 once we begin changing on-disk state (Phase C)
+SUCCESS=0            # set to 1 after a verified switch
+SAVED_META=""        # backup copy of metadata.json (for rollback)
+SAVED_CFG=""         # backup copy of config.yaml   (for rollback)
+BACKUP=""            # temp backup dir of the source data dir
+DST_DIR=""           # target-mode data dir (removed on rollback)
+STARTED_SERVER=0     # we started a target-mode server (stop on rollback)
+CUR=""               # current mode (set once metadata is read)
+
+cleanup_trap() {
+    local rc=$?
+    if [ "$SUCCESS" = 1 ] || [ "$MUTATED" = 0 ]; then
+        exit "$rc"
+    fi
+    warn "switch failed (exit $rc) — rolling back to '$CUR' mode"
+    # Stop a target-mode server we may have started.
+    if [ "$STARTED_SERVER" = 1 ]; then
+        bd dolt stop --force >/dev/null 2>&1 || true
+    fi
+    # Restore the config files we edited.
+    if [ -n "$SAVED_META" ] && [ -f "$SAVED_META" ]; then cp "$SAVED_META" "$META"; fi
+    if [ -n "$SAVED_CFG"  ] && [ -f "$SAVED_CFG"  ]; then cp "$SAVED_CFG"  "$CFG";  fi
+    # Remove any partially-written target data dir.
+    if [ -n "$DST_DIR" ] && [ -d "$DST_DIR" ]; then rm -rf "$DST_DIR"; fi
+    # Make sure the original data dir is intact; restore from backup if needed.
+    if [ -n "$BACKUP" ] && [ -d "$BACKUP" ]; then
+        local src_dir; src_dir=$(data_dir_for "$CUR")
+        if [ ! -d "$src_dir/$DB" ]; then
+            mkdir -p "$src_dir"
+            cp -R "$BACKUP/$(basename "$src_dir")/$DB" "$src_dir/$DB" 2>/dev/null || \
+            cp -R "$BACKUP/"*/"$DB" "$src_dir/$DB" 2>/dev/null || true
+        fi
+    fi
+    # If we were in server mode, bring the server back up.
+    if [ "$CUR" = server ]; then
+        bd dolt start >/dev/null 2>&1 || true
+    fi
+    warn "rolled back to '$CUR' mode. Temporary backup preserved at: ${BACKUP:-<none>}"
+    exit "$rc"
+}
+trap cleanup_trap EXIT
+
+# ---------------------------------------------------------------------------
+# locate the beads dir / repo, read metadata
+# ---------------------------------------------------------------------------
+need bd; need git; need jq
+
+# Resolve this script's real location (through the ~/.local/bin symlink) so we
+# can find sibling scripts like beads-hooks.sh in the plugin.
+resolve_self_dir() {
+    local src="${BASH_SOURCE[0]}" d
+    while [ -L "$src" ]; do
+        d=$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)
+        src=$(readlink "$src"); case "$src" in /*) ;; *) src="$d/$src" ;; esac
+    done
+    cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
+}
+BIN_DIR=$(resolve_self_dir 2>/dev/null || true)
+HOOKS_SH="${BIN_DIR:-}/../scripts/beads-hooks.sh"
+
+BEADS_DIR=$(bd context 2>/dev/null | awk '/beads dir:/{print $NF; exit}')
+[ -n "$BEADS_DIR" ] && [ -d "$BEADS_DIR" ] || die "could not locate a .beads directory (run inside a beads project)"
+REPO_ROOT=$(git -C "$BEADS_DIR" rev-parse --show-toplevel 2>/dev/null) || die "beads dir is not inside a git repository"
+
+META="$BEADS_DIR/metadata.json"
+CFG="$BEADS_DIR/config.yaml"
+[ -f "$META" ] || die "missing $META"
+
+meta_get() { jq -r ".$1 // empty" "$META"; }
+
+BACKEND=$(meta_get backend)
+DB=$(meta_get dolt_database)
+CUR=$(meta_get dolt_mode)
+
+# data_dir_for <mode> -> absolute path of that mode's Dolt data directory
+data_dir_for() {
+    case "$1" in
+        embedded) printf '%s/embeddeddolt' "$BEADS_DIR" ;;
+        server)   printf '%s/dolt'         "$BEADS_DIR" ;;
+        *)        return 1 ;;
+    esac
+}
+
+sync_remote() { git -C "$REPO_ROOT" config --get-regexp '^remote\.origin\.url' >/dev/null 2>&1 && \
+                awk -F'"' '/^sync\.remote:/{print $2}' "$CFG"; }
+
+# ---------------------------------------------------------------------------
+# fingerprint (for the pre/post equivalence check)
+# ---------------------------------------------------------------------------
+fingerprint() {
+    # sorted issue IDs + total count; stable across a byte-identical copy.
+    local ids total
+    ids=$(bd list --json 2>/dev/null | jq -r '.[].id' | sort | tr '\n' ',')
+    total=$(bd stats 2>/dev/null | awk '/Total Issues:/{print $NF}')
+    printf '%s|%s' "${total:-?}" "$ids"
+}
+
+# ---------------------------------------------------------------------------
+# config editors (deterministic; avoid buggy `bd config set` on nested YAML)
+# ---------------------------------------------------------------------------
+set_dolt_mode() {   # $1 = embedded|server ; preserves bd's no-trailing-newline format
+    printf '%s' "$(jq --arg m "$1" '.dolt_mode=$m' "$META")" > "$META.tmp$$"
+    mv "$META.tmp$$" "$META"
+}
+
+set_auto_push() {   # $1 = true|false ; edit the single auto-push line under dolt:
+    if grep -qE '^[[:space:]]*auto-push:' "$CFG"; then
+        sed -i '' -E "s/^([[:space:]]*auto-push:[[:space:]]*).*/\1$1/" "$CFG"
+    else
+        warn "no 'auto-push:' line in config.yaml; leaving dolt.auto-push unchanged"
+    fi
+}
+
+# ===========================================================================
+# report (no args)
+# ===========================================================================
+cmd_report() {
+    info "mode:      $CUR"
+    info "database:  $DB"
+    info "data dir:  $(data_dir_for "$CUR")"
+    local rem; rem=$(sync_remote) || true
+    if [ -n "$rem" ]; then info "remote:    $rem"; fi
+    if [ "$CUR" = server ]; then
+        local st; st=$(bd dolt status 2>/dev/null | awk -F': *' '/Dolt server:/{print $2; exit}') || true
+        info "server:    ${st:-unknown}"
+    fi
+}
+
+# ===========================================================================
+# switch
+# ===========================================================================
+cmd_switch() {
+    local TGT=$1
+    data_dir_for "$TGT" >/dev/null || die "unknown mode: $TGT (use 'embedded' or 'server')"
+    if [ "$TGT" = "$CUR" ]; then
+        info "Already in '$TGT' mode; nothing to do."
+        SUCCESS=1; exit 0
+    fi
+
+    local SRC_DIR DST
+    SRC_DIR=$(data_dir_for "$CUR")
+    DST=$(data_dir_for "$TGT")
+
+    # ---- Phase A: pre-flight verification (read-only) ---------------------
+    step "Verifying configuration (embedded/server switch, bd $(bd version 2>/dev/null | awk '{print $3}'))"
+    bd version 2>/dev/null | grep -qE '\b1\.1\.' || die "this script targets bd 1.1.x; found: $(bd version 2>&1 | head -1)"
+    [ "$BACKEND" = dolt ] || die "backend is '$BACKEND', expected 'dolt'"
+    case "$CUR" in embedded|server) ;; *) die "unexpected current dolt_mode: '$CUR'";; esac
+
+    git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1 || die "no git 'origin' remote"
+    [ -n "$(sync_remote)" ] || die "sync.remote is not configured in config.yaml (audit config required)"
+    git -C "$REPO_ROOT" ls-remote origin refs/dolt/data 2>/dev/null | grep -q . \
+        || die "remote has no refs/dolt/data ref — run a 'bd dolt push' / beads-config-audit first"
+
+    bd migrate --dry-run >/dev/null 2>&1 && bd migrate --dry-run 2>&1 | grep -q 'Version matches' \
+        || die "schema does not match this bd binary (pending migration) — resolve before switching"
+
+    # Soft (audit-preference) checks — warn only.
+    [ "$(bd config get export.auto 2>/dev/null)" = false ] || warn "export.auto is not false (audit preference)"
+    if [ -f "$HOOKS_SH" ]; then
+        "$HOOKS_SH" check "$BEADS_DIR" >/dev/null 2>&1 \
+            || warn "Dolt sync git hooks not installed — run the beads-config-audit skill to install them"
+    fi
+
+    if [ -d "$DST/$DB" ] && [ -n "$(ls -A "$DST/$DB" 2>/dev/null)" ]; then
+        die "target data dir already exists and is non-empty: $DST/$DB (remove or inspect it first)"
+    fi
+
+    local BEFORE; BEFORE=$(fingerprint)
+    info "current issues: ${BEFORE%%|*} (fingerprint captured)"
+
+    # ---- Phase B: make remote current, quiesce, back up -------------------
+    step "Ensuring refs/dolt/data is up to date"
+    bd dolt commit -m "bd-mode: pre-switch commit" >/dev/null 2>&1 || true   # capture any working set
+    bd dolt push >/dev/null 2>&1 || die "bd dolt push failed — off-machine copy not established, aborting"
+    git -C "$REPO_ROOT" ls-remote origin refs/dolt/data 2>/dev/null | grep -q . \
+        || die "refs/dolt/data missing after push"
+    info "pushed; refs/dolt/data is current"
+
+    if [ "$CUR" = server ]; then
+        step "Stopping the project server to quiesce the database"
+        bd dolt stop >/dev/null 2>&1 || true
+        sleep 1
+        bd dolt status 2>/dev/null | grep -q 'not running' || bd dolt stop --force >/dev/null 2>&1 || true
+        bd dolt killall >/dev/null 2>&1 || true
+    fi
+    export BEADS_DOLT_AUTO_START=0   # prevent a stray bd call from relaunching the server mid-switch
+
+    step "Backing up the current Dolt database"
+    BACKUP=$(mktemp -d "${TMPDIR:-/tmp}/bd-mode-backup-${DB}-${CUR}.XXXXXX")
+    cp -R "$SRC_DIR" "$BACKUP"/
+    info "backup: $BACKUP"
+
+    # ---- Phase C: flip the mode config (record originals for rollback) ----
+    step "Switching mode: $CUR -> $TGT"
+    SAVED_META=$(mktemp "${TMPDIR:-/tmp}/bd-mode-meta.XXXXXX"); cp "$META" "$SAVED_META"
+    SAVED_CFG=$(mktemp  "${TMPDIR:-/tmp}/bd-mode-cfg.XXXXXX");  cp "$CFG"  "$SAVED_CFG"
+    MUTATED=1
+    DST_DIR="$DST"
+
+    set_dolt_mode "$TGT"
+    case "$TGT" in
+        embedded) set_auto_push true  ;;   # single-writer: background durability on
+        server)   set_auto_push false ;;   # multi-writer: avoid concurrent auto-push to git remote
+    esac
+
+    # ---- Phase D: transfer state into the new data dir (no bd init) -------
+    step "Transferring database into $TGT data directory"
+    mkdir -p "$DST"
+    if cp -R "$SRC_DIR/$DB" "$DST/$DB"; then
+        info "copied $SRC_DIR/$DB -> $DST/$DB"
+    else
+        warn "direct copy failed; falling back to 'bd bootstrap' from remote"
+        rm -rf "$DST/$DB"
+        transfer_via_bootstrap
+    fi
+
+    unset BEADS_DOLT_AUTO_START
+    if [ "$TGT" = server ]; then
+        step "Starting the project server"
+        bd dolt start >/dev/null 2>&1 || die "failed to start dolt server"
+        STARTED_SERVER=1
+        bd dolt test >/dev/null 2>&1 || die "dolt server did not become reachable"
+    fi
+
+    # ---- Phase E: verify equivalence -------------------------------------
+    step "Verifying the switched database"
+    local AFTER; AFTER=$(fingerprint)
+    if [ "$AFTER" != "$BEFORE" ]; then
+        # give the copy path one more chance via bootstrap before failing
+        warn "issue set differs after copy (before=[$BEFORE] after=[$AFTER]); retrying via bootstrap"
+        if [ "$TGT" = server ]; then bd dolt stop --force >/dev/null 2>&1 || true; STARTED_SERVER=0; fi
+        rm -rf "$DST/$DB"
+        export BEADS_DOLT_AUTO_START=0
+        transfer_via_bootstrap
+        unset BEADS_DOLT_AUTO_START
+        if [ "$TGT" = server ]; then bd dolt start >/dev/null 2>&1 || die "server restart failed"; STARTED_SERVER=1; bd dolt test >/dev/null 2>&1 || die "server unreachable"; fi
+        AFTER=$(fingerprint)
+        [ "$AFTER" = "$BEFORE" ] || die "database not equivalent after transfer (before=[$BEFORE] after=[$AFTER])"
+    fi
+    [ "$(meta_get dolt_mode)" = "$TGT" ] || die "dolt_mode did not update to $TGT"
+    info "verified: mode=$TGT, issues=${AFTER%%|*}"
+
+    # ---- Phase F: finalize ------------------------------------------------
+    SUCCESS=1
+    step "Cleaning up"
+    rm -rf "$SRC_DIR"                      # remove the now-unused old-mode data dir
+    info "removed old data dir: $SRC_DIR"
+    if [ "$TGT" = embedded ]; then        # drop stale server runtime files
+        rm -f "$BEADS_DIR"/dolt-server.* "$BEADS_DIR"/bd.sock "$BEADS_DIR"/bd.sock.startlock 2>/dev/null || true
+    fi
+    info "backup kept at:       $BACKUP"
+
+    step "Done — now in '$TGT' mode"
+    local cfgdiff; cfgdiff=$(git -C "$REPO_ROOT" --no-pager diff --stat -- "$META" "$CFG" 2>/dev/null) || true
+    if [ -n "$cfgdiff" ]; then
+        info "Modified (uncommitted) tracked files:"
+        printf '%s\n' "$cfgdiff" | sed 's/^/  /'
+        info "Review and commit them when ready (this script does not commit)."
+    fi
+}
+
+# Populate the (current dolt_mode's) data dir from the up-to-date remote.
+transfer_via_bootstrap() {
+    bd bootstrap --yes >/dev/null 2>&1 || bd bootstrap -y >/dev/null 2>&1 \
+        || die "bd bootstrap failed to clone from remote"
+}
+
+# ===========================================================================
+# main
+# ===========================================================================
+case "${1-}" in
+    "")                 cmd_report ;;
+    embedded|server)    cmd_switch "$1" ;;
+    -h|--help|help)     sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)                  printf 'usage: %s [embedded|server]\n' "$PROG" >&2; exit 2 ;;
+esac

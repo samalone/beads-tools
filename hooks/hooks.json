@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p \"$HOME/.local/bin\" && ln -sf \"${CLAUDE_PLUGIN_ROOT}/bin/bd-mode\" \"$HOME/.local/bin/bd-mode\""
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/inject-beads-workflow.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}
