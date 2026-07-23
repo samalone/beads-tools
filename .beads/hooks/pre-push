@@ -31,3 +31,24 @@ if command -v bd >/dev/null 2>&1; then
   if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
 fi
 # --- END BEADS INTEGRATION v1.1.0 ---
+
+# --- BEGIN BEADS-TOOLS SYNC (managed by beads-tools; edits here are overwritten) ---
+# Sync Beads Dolt data to the remote whenever code is pushed to origin.
+# Non-blocking by policy: this section never fails a git push.
+if command -v bd >/dev/null 2>&1; then
+  case "${1:-origin}" in
+    origin|"")
+      _bdt_to=${BEADS_HOOK_TIMEOUT:-120}
+      _bdt() { if command -v timeout >/dev/null 2>&1; then timeout "$_bdt_to" "$@";
+               elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$_bdt_to" "$@";
+               else "$@"; fi; }
+      bd dolt commit -m "beads-tools: pre-push sync" >/dev/null 2>&1 || true
+      if _bdt bd dolt push >/dev/null 2>&1; then
+        echo "beads-tools: pushed Dolt issue data (refs/dolt/data)" >&2
+      else
+        echo "beads-tools: 'bd dolt push' skipped/failed — continuing with git push" >&2
+      fi
+      ;;
+  esac
+fi
+# --- END BEADS-TOOLS SYNC ---
