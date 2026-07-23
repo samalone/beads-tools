@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS = BSD userland (the primary platform); Linux = GNU userland,
+        # the leg that catches BSD-isms (sed -i '', readlink -f, etc.).
+        os: [macos-latest, ubuntu-latest]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      # Homebrew on both legs (beads is in homebrew/core; matches local setup).
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+
+      - name: Install bd, bats-core, shellcheck
+        run: brew install beads bats-core shellcheck
+
+      - name: Assert bd is 1.1.x
+        run: |
+          v=$(bd version | awk '{print $3; exit}')
+          echo "bd $v"
+          case "$v" in
+            1.1.*) ;;
+            *) echo "::error::plugin targets bd 1.1.x but the runner has $v — re-verify commands and bump support before updating"; exit 1 ;;
+          esac
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      # Non-strict on purpose: --strict fails on the intentional plugin-root
+      # CLAUDE.md ("not loaded as project context") warning. Allow exactly that
+      # one warning; fail on any new/other warning.
+      - name: Validate plugin manifest
+        run: |
+          set -euo pipefail
+          out=$(claude plugin validate ./ 2>&1) || { printf '%s\n' "$out"; echo "::error::claude plugin validate failed"; exit 1; }
+          printf '%s\n' "$out"
+          n=$(printf '%s\n' "$out" | sed -n 's/.*Found \([0-9][0-9]*\) warning.*/\1/p' | head -1)
+          n=${n:-0}
+          if [ "$n" -gt 1 ]; then
+            echo "::error::validate produced $n warnings; only the known root-CLAUDE.md warning is allowed"; exit 1
+          fi
+          if [ "$n" -eq 1 ] && ! printf '%s\n' "$out" | grep -q 'CLAUDE.md at the plugin root is not loaded'; then
+            echo "::error::validate produced an unexpected warning (not the known root-CLAUDE.md one)"; exit 1
+          fi
+
+      - name: Shellcheck
+        run: |
+          shellcheck bin/bd-mode scripts/beads-config-audit.sh scripts/beads-hooks.sh
+          shellcheck -s sh scripts/inject-beads-workflow.sh
+          shellcheck -x test/helpers/setup.bash
+
+      - name: Syntax check
+        run: |
+          bash -n bin/bd-mode scripts/beads-config-audit.sh scripts/beads-hooks.sh
+          sh -n scripts/inject-beads-workflow.sh
+
+      # Fixtures live under $HOME (bd rejects /tmp); the runner home is bd-safe.
+      - name: Run bats suite
+        run: bats test/
