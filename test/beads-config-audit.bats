@@ -72,18 +72,23 @@ teardown() {
 
 @test "audit: does not fold pre-existing staged changes into its commit" {
     make_project
+    local before; before="$(git -C "$PROJECT" rev-parse HEAD)"
     # The user stages an unrelated change before running the audit.
     echo "hello" > "$PROJECT/UNRELATED.txt"
     git -C "$PROJECT" add UNRELATED.txt
     run bash -c "cd '$PROJECT' && '$AUDIT' ."
     [ "$status" -eq 0 ]
-    # The audit's own commit must NOT contain the user's unrelated file...
+    # The audit made its own commit (HEAD advanced) — otherwise the checks below
+    # would pass vacuously against the pre-audit commit.
+    [ "$(git -C "$PROJECT" rev-parse HEAD)" != "$before" ]
+    # ...which must NOT contain the user's unrelated file...
     run git -C "$PROJECT" show --stat --format= HEAD
     [[ "$output" != *"UNRELATED.txt"* ]]
-    # ...and that change is preserved on disk (just no longer staged).
+    # ...and that change is preserved on disk, un-staged by the audit's reset
+    # (staged "A " before → untracked "??" after), never committed.
     [ -f "$PROJECT/UNRELATED.txt" ]
-    run git -C "$PROJECT" status --porcelain UNRELATED.txt
-    [[ -n "$output" ]]                                        # still a pending change
+    run git -C "$PROJECT" status --porcelain -- UNRELATED.txt
+    [ "$output" = "?? UNRELATED.txt" ]
 }
 
 @test "audit: gate 20 (ambiguous config) is not deterministically reproducible" {

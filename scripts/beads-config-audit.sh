@@ -90,8 +90,10 @@ head_ "Schema"
 # early line of bd's multi-line output and closes the pipe, bd then dies with
 # SIGPIPE, and pipefail makes the whole pipeline non-zero — inverting the test
 # into a spurious gate-13. (Deterministic on fresh embedded inits; see bd-dqp.)
-_schema=$(bd -C "$REPO_ROOT" migrate --dry-run 2>&1) || true
-if grep -q 'Version matches' <<<"$_schema"; then
+# Require the dry-run to SUCCEED as well as match — a non-zero exit after a
+# "Version matches" line (e.g. a later lock/read error) must not be accepted as a
+# verified schema, matching bd-mode's stricter check.
+if _schema=$(bd -C "$REPO_ROOT" migrate --dry-run 2>&1) && grep -q 'Version matches' <<<"$_schema"; then
     ok "schema matches bd $VER"
 else
     # Positively confirm "no remote" before auto-migrating: a FAILED remote
