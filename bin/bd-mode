@@ -106,7 +106,11 @@ BIN_DIR=$(resolve_self_dir 2>/dev/null || true)
 HOOKS_SH="${BIN_DIR:-}/../scripts/beads-hooks.sh"
 
 # Keep the full path after "beads dir:" — $NF would truncate a path with spaces.
-BEADS_DIR=$(bd context 2>/dev/null | sed -n 's/^[[:space:]]*beads dir:[[:space:]]*//p' | head -n1)
+# Capture then parse (no `bd context | sed | head`): an early-closing head makes
+# bd/sed SIGPIPE and, under pipefail, turns this into a flaky 141 abort.
+_ctx=$(bd context 2>/dev/null) || _ctx=""
+BEADS_DIR=$(sed -n 's/^[[:space:]]*beads dir:[[:space:]]*//p' <<<"$_ctx")
+BEADS_DIR=${BEADS_DIR%%$'\n'*}      # first match only
 [ -n "$BEADS_DIR" ] && [ -d "$BEADS_DIR" ] || die "could not locate a .beads directory (run inside a beads project)"
 REPO_ROOT=$(git -C "$BEADS_DIR" rev-parse --show-toplevel 2>/dev/null) || die "beads dir is not inside a git repository"
 
@@ -138,8 +142,12 @@ data_dir_for() {
 }
 
 # Read sync.remote from config.yaml, tolerating quoted or unquoted values.
+# Capture then take the first line via parameter expansion (no `| head`, which
+# would SIGPIPE sed under pipefail).
 sync_remote() {
-    sed -n -E 's/^sync\.remote:[[:space:]]*"?([^"]*[^"[:space:]])"?[[:space:]]*$/\1/p' "$CFG" 2>/dev/null | head -n1
+    local _sr
+    _sr=$(sed -n -E 's/^sync\.remote:[[:space:]]*"?([^"]*[^"[:space:]])"?[[:space:]]*$/\1/p' "$CFG" 2>/dev/null)
+    printf '%s' "${_sr%%$'\n'*}"
 }
 
 # ---------------------------------------------------------------------------
@@ -199,7 +207,8 @@ cmd_report() {
     local rem; rem=$(sync_remote) || true
     if [ -n "$rem" ]; then info "remote:    $rem"; fi
     if [ "$CUR" = server ]; then
-        local st; st=$(bd dolt status 2>/dev/null | awk -F': *' '/Dolt server:/{print $2; exit}') || true
+        local st _dss; _dss=$(bd dolt status 2>/dev/null) || _dss=""
+        st=$(awk -F': *' '/Dolt server:/{print $2; exit}' <<<"$_dss") || true
         info "server:    ${st:-unknown}"
     fi
 }
@@ -220,8 +229,12 @@ cmd_switch() {
     DST=$(data_dir_for "$TGT")
 
     # ---- Phase A: pre-flight verification (read-only) ---------------------
-    step "Verifying configuration (embedded/server switch, bd $(bd version 2>/dev/null | awk '{print $3}'))"
-    local _ver; _ver=$(bd version 2>/dev/null | awk '{print $3; exit}')
+    # Capture bd version once, parse via here-string (never `bd … | awk '…exit'`,
+    # whose early close SIGPIPEs bd into a flaky 141 under pipefail).
+    local _vraw _ver
+    _vraw=$(bd version 2>/dev/null) || _vraw=""
+    _ver=$(awk '{print $3; exit}' <<<"$_vraw")
+    step "Verifying configuration (embedded/server switch, bd ${_ver:-unknown})"
     case "$_ver" in 1.1.*) ;; *) die "this script targets bd 1.1.x; found: ${_ver:-unknown}" ;; esac
     [ "$BACKEND" = dolt ] || die "backend is '$BACKEND', expected 'dolt'"
     case "$CUR" in embedded|server) ;; *) die "unexpected current dolt_mode: '$CUR'";; esac

@@ -62,7 +62,11 @@ cd "$REPO_ROOT"
 META="$BEADS_DIR/metadata.json"
 CFG="$BEADS_DIR/config.yaml"
 
-VER=$(bd version 2>/dev/null | awk '{print $3; exit}')
+# Capture then parse via here-string (never `bd … | awk '…exit'`): awk's early
+# exit closes the pipe, bd gets SIGPIPE, and pipefail turns the whole pipeline
+# (a command substitution under set -e) into a 141 abort — a flaky CI failure.
+_ver_raw=$(bd version 2>/dev/null) || _ver_raw=""
+VER=$(awk '{print $3; exit}' <<<"$_ver_raw")
 case "$VER" in 1.1.*) ok "bd $VER" ;; *) gate 11 "unsupported bd version '$VER' (targets 1.1.x); re-verify commands before proceeding" ;; esac
 
 [ -f "$META" ] || gate 12 "no $META — not a Dolt-backed beads project"
@@ -70,7 +74,8 @@ BACKEND=$(jq -r '.backend // .database // empty' "$META")
 [ "$BACKEND" = dolt ] || gate 12 "backend='$BACKEND' (expected dolt) — possible pre-Dolt layout, needs migration not audit"
 MODE=$(jq -r '.dolt_mode // "embedded"' "$META")
 DB=$(jq -r '.dolt_database // empty' "$META")
-DATA_DIR=$(bd -C "$REPO_ROOT" dolt show 2>/dev/null | awk -F': *' '/Data:/{print $2; exit}')
+_show_raw=$(bd -C "$REPO_ROOT" dolt show 2>/dev/null) || _show_raw=""
+DATA_DIR=$(awk -F': *' '/Data:/{print $2; exit}' <<<"$_show_raw")
 [ -n "$DATA_DIR" ] && [ -d "$DATA_DIR" ] || gate 12 "Dolt data dir not found (reported: '${DATA_DIR:-none}') — possible pre-Dolt/corrupt, stopping"
 ok "mode=$MODE  database=$DB"
 ok "data dir=$DATA_DIR"
@@ -270,9 +275,10 @@ if bd -C "$REPO_ROOT" vc status >/dev/null 2>&1; then ok "bd vc status works"; e
 for pat in "$data_base/" ".beads-credential-key" "*.db"; do
     if grep -qF "$pat" "$gi" 2>/dev/null; then ok "gitignored: $pat"; else warn "not gitignored: $pat (check $gi)"; fi
 done
-# capture-then-test avoids a pipefail/SIGPIPE inversion that could mis-report a
-# tracked DB dir as untracked (grep -q exits early -> git dies -> pipeline fails)
-if [ -n "$(git -C "$REPO_ROOT" ls-files "$DATA_DIR" 2>/dev/null | head -n1)" ]; then
+# Capture then test (no `| head -n1`): an early-closing consumer would make git
+# SIGPIPE and, under pipefail, mis-report a tracked DB dir as untracked.
+_db_tracked=$(git -C "$REPO_ROOT" ls-files "$DATA_DIR" 2>/dev/null) || _db_tracked=""
+if [ -n "$_db_tracked" ]; then
     warn "DB dir is TRACKED — must not be committed"
 else
     ok "DB dir not tracked"
