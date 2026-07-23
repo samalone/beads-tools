@@ -59,12 +59,31 @@ teardown() {
     export BEADS_DOLT_AUTO_START=0
     PROJECT="$(mktemp -d "$BD_TESTS_BASE/bdt-noremote.XXXXXX")"
     git init -q "$PROJECT"
+    fixture_identity "$PROJECT"
     ( cd "$PROJECT" && bd init >/dev/null 2>&1 )             # no origin, no push
-    local head; head="$(git -C "$PROJECT" rev-parse HEAD)"
+    # Tolerate an unborn HEAD (bd init may not commit without a prior commit):
+    # capture "" then compare "" afterward — the point is that no NEW commit was made.
+    local head; head="$(git -C "$PROJECT" rev-parse --verify -q HEAD || true)"
     run bash -c "cd '$PROJECT' && '$AUDIT' ."
     [ "$status" -eq 15 ]
     [ -d "$PROJECT/.beads/embeddeddolt" ]                     # durability data intact
-    [ "$(git -C "$PROJECT" rev-parse HEAD)" = "$head" ]       # stopped before any commit
+    [ "$(git -C "$PROJECT" rev-parse --verify -q HEAD || true)" = "$head" ]  # stopped before any commit
+}
+
+@test "audit: does not fold pre-existing staged changes into its commit" {
+    make_project
+    # The user stages an unrelated change before running the audit.
+    echo "hello" > "$PROJECT/UNRELATED.txt"
+    git -C "$PROJECT" add UNRELATED.txt
+    run bash -c "cd '$PROJECT' && '$AUDIT' ."
+    [ "$status" -eq 0 ]
+    # The audit's own commit must NOT contain the user's unrelated file...
+    run git -C "$PROJECT" show --stat --format= HEAD
+    [[ "$output" != *"UNRELATED.txt"* ]]
+    # ...and that change is preserved on disk (just no longer staged).
+    [ -f "$PROJECT/UNRELATED.txt" ]
+    run git -C "$PROJECT" status --porcelain UNRELATED.txt
+    [[ -n "$output" ]]                                        # still a pending change
 }
 
 @test "audit: gate 20 (ambiguous config) is not deterministically reproducible" {

@@ -31,6 +31,13 @@ require_tools() {
     done
 }
 
+# fixture_identity <repo> — set a repo-local git identity so commits (bd init's
+# own and the tests') succeed on a machine with no global git config, e.g. CI.
+fixture_identity() {
+    git -C "$1" config user.name  "beads-tools tests"
+    git -C "$1" config user.email "beads-tools-tests@example.invalid"
+}
+
 # make_project [--audit]
 #   Create an isolated embedded bd project with a bare origin already pushed.
 #   Sets PROJECT and ORIGIN. With --audit, also runs beads-config-audit so the
@@ -42,9 +49,15 @@ make_project() {
     ORIGIN="$PROJECT.origin.git"              # sibling of PROJECT, not nested inside it
     git init -q "$PROJECT"
     git init -q --bare "$ORIGIN"
+    fixture_identity "$PROJECT"
     git -C "$PROJECT" remote add origin "$ORIGIN"
+    # A committed HEAD before pushing: CI runners have no global git identity, so
+    # bd init's own auto-commit is skipped there and HEAD would be unborn —
+    # `git push -u origin HEAD` then fails and the bare origin gets no branch (so
+    # `bd dolt push` can't run either, since it needs an initial branch). The
+    # explicit identity + initial commit make setup work on a clean machine.
+    git -C "$PROJECT" commit -q --allow-empty -m "init test fixture"
     ( cd "$PROJECT" && bd init >/dev/null 2>&1 )
-    # bd dolt push needs the git remote to have an initial branch.
     git -C "$PROJECT" push -u origin HEAD >/dev/null 2>&1
     if [ "${1:-}" = "--audit" ]; then
         ( cd "$PROJECT" && "$AUDIT" . >/dev/null 2>&1 )
@@ -60,11 +73,13 @@ autopush_line() { grep -E '^dolt\.auto-push:' "$PROJECT/.beads/config.yaml" || t
 # Content signature of the issue set, stable across a byte-identical DB copy.
 issue_sig() { ( cd "$PROJECT" && bd list --json 2>/dev/null | jq -Sc 'sort_by(.id) | map({id, status})' ); }
 
-# Guarded recursive delete — refuses empty / root / $HOME.
+# Guarded recursive delete — refuses empty / root / $HOME and any parent-
+# traversal path (a future bad fixture var must not delete outside test dirs).
 safe_rm() {
-    case "${1:-}" in
-        ""|/|"$HOME"|"$HOME"/) return 0 ;;
-        *) rm -rf "$1" ;;
+    local path="${1:-}"
+    case "$path" in
+        ""|/|.|..|"$HOME"|"$HOME"/|../*|*/..|*/../*) return 0 ;;
+        *) rm -rf -- "$path" ;;
     esac
 }
 
