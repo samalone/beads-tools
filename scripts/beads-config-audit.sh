@@ -107,10 +107,23 @@ fi
 # ---------------------------------------------------------------------------
 # helpers for config editing (avoid buggy `bd config set` on nested YAML)
 # ---------------------------------------------------------------------------
-# Count how many representations of a dotted key exist (flat + nested-leaf).
+# Count how many representations of a dotted key exist: flat dotted lines plus
+# nested leaves UNDER THE RIGHT PARENT only. Must be parent-aware to match the
+# removal logic in ensure_config — otherwise a same-named leaf under an unrelated
+# block (e.g. `auto-push:` under some other section) is miscounted as a duplicate
+# and trips a spurious gate 20.
 config_count() {
-    local key="$1" leaf="${1##*.}" ke; ke=$(printf '%s' "$key" | sed 's/\./\\./g')
-    grep -cE "^${ke}:|^[[:space:]]+${leaf}:" "$CFG" 2>/dev/null || true
+    local key="$1" leaf="${1##*.}" ns="${1%.*}" keyre
+    keyre=$(printf '%s' "$key" | sed 's/[][(){}.^$*+?|\\]/\\&/g')
+    awk -v keyre="$keyre" -v leaf="$leaf" -v ns="$ns" '
+        /^[^[:space:]#]/ {
+            if ($0 ~ /^[A-Za-z0-9_.-]+:[[:space:]]*$/) { cur=$0; sub(/:.*/,"",cur) }
+            else { cur="" }
+        }
+        $0 ~ "^" keyre ":"                          { c++; next }
+        ($0 ~ "^[[:space:]]+" leaf ":") && cur==ns  { c++; next }
+        END { print c+0 }
+    ' "$CFG" 2>/dev/null || printf 0
 }
 
 # Normalize a scalar key to a single flat dotted line "key: value".
