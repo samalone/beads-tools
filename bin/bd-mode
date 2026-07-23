@@ -228,11 +228,19 @@ cmd_switch() {
 
     git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1 || die "no git 'origin' remote"
     [ -n "$(sync_remote)" ] || die "sync.remote is not configured in config.yaml (audit config required)"
-    git -C "$REPO_ROOT" ls-remote origin refs/dolt/data 2>/dev/null | grep -q . \
-        || die "remote has no refs/dolt/data ref — run a 'bd dolt push' / beads-config-audit first"
+    # Capture then test for a non-empty ref (never `| grep -q .`): under pipefail
+    # grep -q closes the pipe on the first line, git dies with SIGPIPE, and the
+    # pipeline goes non-zero — misreading a present ref as missing.
+    _ref=$(git -C "$REPO_ROOT" ls-remote origin refs/dolt/data 2>/dev/null) || _ref=""
+    [ -n "$_ref" ] || die "remote has no refs/dolt/data ref — run a 'bd dolt push' / beads-config-audit first"
 
-    # shellcheck disable=SC2015  # intentional guard: die unless the dry-run succeeds AND reports a match
-    bd migrate --dry-run >/dev/null 2>&1 && bd migrate --dry-run 2>&1 | grep -q 'Version matches' \
+    # Capture the dry-run output once, then match with a here-string. Piping bd
+    # straight into `grep -q` inverts under pipefail (grep closes early -> bd
+    # SIGPIPE -> non-zero pipeline -> spurious "schema does not match"). Same
+    # deterministic bug as the audit's schema check (see bd-dqp).
+    local _schema; _schema=$(bd migrate --dry-run 2>&1) \
+        || die "schema does not match this bd binary (pending migration) — resolve before switching"
+    grep -q 'Version matches' <<<"$_schema" \
         || die "schema does not match this bd binary (pending migration) — resolve before switching"
 
     # Soft (audit-preference) checks — warn only.
@@ -253,8 +261,8 @@ cmd_switch() {
     step "Ensuring refs/dolt/data is up to date"
     bd dolt commit -m "bd-mode: pre-switch commit" >/dev/null 2>&1 || true   # capture any working set
     bd dolt push >/dev/null 2>&1 || die "bd dolt push failed — off-machine copy not established, aborting"
-    git -C "$REPO_ROOT" ls-remote origin refs/dolt/data 2>/dev/null | grep -q . \
-        || die "refs/dolt/data missing after push"
+    _ref=$(git -C "$REPO_ROOT" ls-remote origin refs/dolt/data 2>/dev/null) || _ref=""
+    [ -n "$_ref" ] || die "refs/dolt/data missing after push"
     info "pushed; refs/dolt/data is current"
 
     if [ "$CUR" = server ]; then
@@ -262,7 +270,8 @@ cmd_switch() {
         STOPPED_SERVER=1   # so rollback restarts it even if we fail before MUTATED
         bd dolt stop >/dev/null 2>&1 || true
         sleep 1
-        bd dolt status 2>/dev/null | grep -q 'not running' || bd dolt stop --force >/dev/null 2>&1 || true
+        _st=$(bd dolt status 2>/dev/null) || _st=""
+        grep -q 'not running' <<<"$_st" || bd dolt stop --force >/dev/null 2>&1 || true
         bd dolt killall >/dev/null 2>&1 || true
     fi
     export BEADS_DOLT_AUTO_START=0   # prevent a stray bd call from relaunching the server mid-switch

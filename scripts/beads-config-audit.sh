@@ -80,14 +80,20 @@ ok "data dir=$DATA_DIR"
 # 2. Schema / migration state
 # ---------------------------------------------------------------------------
 head_ "Schema"
-if bd -C "$REPO_ROOT" migrate --dry-run 2>&1 | grep -q 'Version matches'; then
+# Capture the output first, then match with a here-string. Do NOT pipe the bd
+# call straight into `grep -q`: under `set -o pipefail`, grep -q matches on an
+# early line of bd's multi-line output and closes the pipe, bd then dies with
+# SIGPIPE, and pipefail makes the whole pipeline non-zero — inverting the test
+# into a spurious gate-13. (Deterministic on fresh embedded inits; see bd-dqp.)
+_schema=$(bd -C "$REPO_ROOT" migrate --dry-run 2>&1) || true
+if grep -q 'Version matches' <<<"$_schema"; then
     ok "schema matches bd $VER"
 else
     # Positively confirm "no remote" before auto-migrating: a FAILED remote
     # lookup must NOT be read as "no remote" (that would migrate a possibly
     # remote-backed DB). Only the explicit "no remotes" text counts.
     _rl=$(bd -C "$REPO_ROOT" dolt remote list 2>/dev/null) || _rl=""
-    _no_remote=0; printf '%s' "$_rl" | grep -qi 'no remotes' && _no_remote=1
+    _no_remote=0; grep -qi 'no remotes' <<<"$_rl" && _no_remote=1
     if [ "$ALLOW_MIGRATE" = 1 ] && [ "$_no_remote" = 1 ]; then
         warn "pending migration, no remote, --allow-migrate set → backing up and migrating"
         bd -C "$REPO_ROOT" backup >/dev/null 2>&1 || warn "bd backup returned non-zero"
@@ -156,7 +162,11 @@ ensure_config() {
 # 3. Durability first: ensure the Dolt remote + first push
 # ---------------------------------------------------------------------------
 head_ "Durability (remote + push)"
-if bd -C "$REPO_ROOT" dolt remote list 2>/dev/null | grep -qiv 'no remotes'; then
+# "configured" = non-empty output that does not say "no remotes". Capture then
+# test (a here-string, not a `grep -qv` pipe) to avoid the pipefail/SIGPIPE
+# inversion that could misread a real remote as absent and re-add it.
+_remotes=$(bd -C "$REPO_ROOT" dolt remote list 2>/dev/null) || _remotes=""
+if [ -n "$_remotes" ] && ! grep -qi 'no remotes' <<<"$_remotes"; then
     ok "dolt remote already configured"
 else
     ORIGIN=$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)
@@ -168,8 +178,10 @@ bd -C "$REPO_ROOT" dolt commit -m "beads-config-audit: pre-push" >/dev/null 2>&1
 if ! bd -C "$REPO_ROOT" dolt push >/dev/null 2>&1; then
     gate 15 "'bd dolt push' failed — remote durability not established (is the git remote initialized?). Stopping before any JSONL removal."
 fi
-git -C "$REPO_ROOT" ls-remote origin refs/dolt/data 2>/dev/null | grep -q . \
-    || gate 15 "refs/dolt/data missing on remote after push"
+# Capture then test for non-empty (not `| grep -q .`, which can SIGPIPE-invert
+# under pipefail and misreport a present ref as missing).
+_ref=$(git -C "$REPO_ROOT" ls-remote origin refs/dolt/data 2>/dev/null) || _ref=""
+[ -n "$_ref" ] || gate 15 "refs/dolt/data missing on remote after push"
 ok "refs/dolt/data present on remote"
 
 # ---------------------------------------------------------------------------
