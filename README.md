@@ -45,3 +45,29 @@ back on any failure.
   sync-point in embedded mode.
 - Targets **bd 1.1.x**; the audit script refuses on other versions rather than
   running commands whose flags may have shifted.
+
+## Development / testing
+
+CI (`.github/workflows/ci.yml`) runs the manifest validator, `shellcheck`, and
+the [bats](https://github.com/bats-core/bats-core) suite on macOS **and** Linux
+for every PR. To run the same checks locally (tools via Homebrew):
+
+```bash
+brew install bats-core shellcheck jq         # bd 1.1.x must already be installed
+
+# manifest / hooks / frontmatter (non-strict: the intentional plugin-root
+# CLAUDE.md warning makes --strict fail — see the CI allowlist)
+claude plugin validate ./
+
+bash -n bin/bd-mode scripts/beads-config-audit.sh scripts/beads-hooks.sh
+sh -n scripts/inject-beads-workflow.sh
+shellcheck bin/bd-mode scripts/beads-config-audit.sh scripts/beads-hooks.sh
+shellcheck -s sh scripts/inject-beads-workflow.sh
+bats test/                                    # ~3 min; spins real bd + Dolt in throwaway fixtures
+```
+
+The bats fixtures are fully isolated: each builds a throwaway `bd init` project
+with a bare git origin under `$HOME` (bd refuses `/tmp`-family "unsafe"
+locations; override the base with `BD_TESTS_TMPDIR`), exercises a tool, asserts
+on the result, and tears down — stopping only its **own** Dolt server, never a
+machine-wide `bd dolt killall`. They never touch a live repo.

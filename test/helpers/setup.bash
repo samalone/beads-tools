@@ -1,0 +1,106 @@
+# Shared harness for the beads-tools bats suite.
+#
+# Every test runs against a throwaway `bd init` project with a bare git origin —
+# never a live repo. bd refuses to operate in "unsafe" temp locations (/tmp,
+# /var/tmp), so fixtures live under $HOME by default; override with
+# BD_TESTS_TMPDIR pointing at any bd-safe directory.
+#
+# Teardown stops only the fixture's own Dolt server, project-scoped
+# (`bd -C <proj> dolt stop --force`). Note on killall: `bd dolt killall` is
+# ALSO project-scoped in standalone mode — per `bd dolt killall --help`, it only
+# reaps servers using the current project's Dolt data directory and "Other
+# projects' servers are preserved." So bd-mode's server-quiesce killall, which
+# runs in the fixture's own context, cannot touch a developer's unrelated live
+# server (verified: the suite runs with other live project servers untouched).
+# Only under an orchestrator ($GT_ROOT) is killall broader, and the tests never
+# set that up.
+
+# This file is sourced via bats `load`; the vars/functions below are the harness
+# API consumed by the .bats files, which shellcheck can't see across the load.
+# shellcheck disable=SC2034  # BD_MODE/AUDIT/HOOKS_SH/INJECT_SH used by sourcing tests
+
+# Absolute paths to the tools under test (BATS_TEST_DIRNAME = the test/ dir).
+REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+BD_MODE="$REPO_ROOT/bin/bd-mode"
+AUDIT="$REPO_ROOT/scripts/beads-config-audit.sh"
+HOOKS_SH="$REPO_ROOT/scripts/beads-hooks.sh"
+INJECT_SH="$REPO_ROOT/scripts/inject-beads-workflow.sh"
+
+# bd-safe base for fixtures (not /tmp or /var/tmp).
+BD_TESTS_BASE="${BD_TESTS_TMPDIR:-$HOME}"
+
+# Skip the whole test cleanly if a required tool is missing.
+require_tools() {
+    local t
+    for t in bd git jq; do
+        command -v "$t" >/dev/null 2>&1 || skip "required tool not found: $t"
+    done
+}
+
+# fixture_identity <repo> — set a repo-local git identity so commits (bd init's
+# own and the tests') succeed on a machine with no global git config, e.g. CI.
+fixture_identity() {
+    git -C "$1" config user.name  "beads-tools tests"
+    git -C "$1" config user.email "beads-tools-tests@example.invalid"
+}
+
+# make_project [--audit]
+#   Create an isolated embedded bd project with a bare origin already pushed.
+#   Sets PROJECT and ORIGIN. With --audit, also runs beads-config-audit so the
+#   project has refs/dolt/data, sync.remote, the sync hooks, and normalized
+#   config (the precondition bd-mode requires).
+make_project() {
+    export BEADS_DOLT_AUTO_START=0            # never auto-start a server during setup
+    PROJECT="$(mktemp -d "$BD_TESTS_BASE/bdt-proj.XXXXXX")"
+    ORIGIN="$PROJECT.origin.git"              # sibling of PROJECT, not nested inside it
+    git init -q "$PROJECT"
+    git init -q --bare "$ORIGIN"
+    fixture_identity "$PROJECT"
+    git -C "$PROJECT" remote add origin "$ORIGIN"
+    # A committed HEAD before pushing: CI runners have no global git identity, so
+    # bd init's own auto-commit is skipped there and HEAD would be unborn —
+    # `git push -u origin HEAD` then fails and the bare origin gets no branch (so
+    # `bd dolt push` can't run either, since it needs an initial branch). The
+    # explicit identity + initial commit make setup work on a clean machine.
+    git -C "$PROJECT" commit -q --allow-empty -m "init test fixture"
+    ( cd "$PROJECT" && bd init >/dev/null 2>&1 )
+    git -C "$PROJECT" push -u origin HEAD >/dev/null 2>&1
+    if [ "${1:-}" = "--audit" ]; then
+        ( cd "$PROJECT" && "$AUDIT" . >/dev/null 2>&1 )
+    fi
+}
+
+# Read a scalar from the fixture's metadata.json.
+meta() { jq -r ".$1 // empty" "$PROJECT/.beads/metadata.json"; }
+
+# The single flat dolt.auto-push line (empty if absent/duplicated).
+autopush_line() { grep -E '^dolt\.auto-push:' "$PROJECT/.beads/config.yaml" || true; }
+
+# Content signature of the issue set, stable across a byte-identical DB copy.
+issue_sig() { ( cd "$PROJECT" && bd list --json 2>/dev/null | jq -Sc 'sort_by(.id) | map({id, status})' ); }
+
+# Guarded recursive delete — refuses empty / root / $HOME and any parent-
+# traversal path (a future bad fixture var must not delete outside test dirs).
+safe_rm() {
+    local path="${1:-}"
+    case "$path" in
+        ""|/|.|..|"$HOME"|"$HOME"/|../*|*/..|*/../*) return 0 ;;
+        *) rm -rf -- "$path" ;;
+    esac
+}
+
+# Standard teardown: stop the fixture server (scoped), remove PROJECT + ORIGIN,
+# and sweep any bd-mode temp backups this run left in TMPDIR.
+bdt_teardown() {
+    cd "$BD_TESTS_BASE" 2>/dev/null || cd / || true   # never sit inside the dir we delete
+    if [ -n "${PROJECT:-}" ] && [ -d "$PROJECT/.beads" ]; then
+        ( cd "$PROJECT" && bd dolt stop --force >/dev/null 2>&1 ) || true
+    fi
+    safe_rm "${PROJECT:-}"
+    safe_rm "${ORIGIN:-}"
+    # bd-mode writes backups to ${TMPDIR:-/tmp}/bd-mode-backup-<db>-<mode>.XXXX
+    local db="${BDT_DB:-}"
+    if [ -n "$db" ]; then
+        rm -rf "${TMPDIR:-/tmp}"/bd-mode-backup-"$db"-* 2>/dev/null || true
+    fi
+}

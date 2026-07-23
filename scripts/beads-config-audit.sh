@@ -62,7 +62,11 @@ cd "$REPO_ROOT"
 META="$BEADS_DIR/metadata.json"
 CFG="$BEADS_DIR/config.yaml"
 
-VER=$(bd version 2>/dev/null | awk '{print $3; exit}')
+# Capture then parse via here-string (never `bd … | awk '…exit'`): awk's early
+# exit closes the pipe, bd gets SIGPIPE, and pipefail turns the whole pipeline
+# (a command substitution under set -e) into a 141 abort — a flaky CI failure.
+_ver_raw=$(bd version 2>/dev/null) || _ver_raw=""
+VER=$(awk '{print $3; exit}' <<<"$_ver_raw")
 case "$VER" in 1.1.*) ok "bd $VER" ;; *) gate 11 "unsupported bd version '$VER' (targets 1.1.x); re-verify commands before proceeding" ;; esac
 
 [ -f "$META" ] || gate 12 "no $META — not a Dolt-backed beads project"
@@ -70,7 +74,8 @@ BACKEND=$(jq -r '.backend // .database // empty' "$META")
 [ "$BACKEND" = dolt ] || gate 12 "backend='$BACKEND' (expected dolt) — possible pre-Dolt layout, needs migration not audit"
 MODE=$(jq -r '.dolt_mode // "embedded"' "$META")
 DB=$(jq -r '.dolt_database // empty' "$META")
-DATA_DIR=$(bd -C "$REPO_ROOT" dolt show 2>/dev/null | awk -F': *' '/Data:/{print $2; exit}')
+_show_raw=$(bd -C "$REPO_ROOT" dolt show 2>/dev/null) || _show_raw=""
+DATA_DIR=$(awk -F': *' '/Data:/{print $2; exit}' <<<"$_show_raw")
 [ -n "$DATA_DIR" ] && [ -d "$DATA_DIR" ] || gate 12 "Dolt data dir not found (reported: '${DATA_DIR:-none}') — possible pre-Dolt/corrupt, stopping"
 ok "mode=$MODE  database=$DB"
 ok "data dir=$DATA_DIR"
@@ -80,14 +85,22 @@ ok "data dir=$DATA_DIR"
 # 2. Schema / migration state
 # ---------------------------------------------------------------------------
 head_ "Schema"
-if bd -C "$REPO_ROOT" migrate --dry-run 2>&1 | grep -q 'Version matches'; then
+# Capture the output first, then match with a here-string. Do NOT pipe the bd
+# call straight into `grep -q`: under `set -o pipefail`, grep -q matches on an
+# early line of bd's multi-line output and closes the pipe, bd then dies with
+# SIGPIPE, and pipefail makes the whole pipeline non-zero — inverting the test
+# into a spurious gate-13. (Deterministic on fresh embedded inits; see bd-dqp.)
+# Require the dry-run to SUCCEED as well as match — a non-zero exit after a
+# "Version matches" line (e.g. a later lock/read error) must not be accepted as a
+# verified schema, matching bd-mode's stricter check.
+if _schema=$(bd -C "$REPO_ROOT" migrate --dry-run 2>&1) && grep -q 'Version matches' <<<"$_schema"; then
     ok "schema matches bd $VER"
 else
     # Positively confirm "no remote" before auto-migrating: a FAILED remote
     # lookup must NOT be read as "no remote" (that would migrate a possibly
     # remote-backed DB). Only the explicit "no remotes" text counts.
     _rl=$(bd -C "$REPO_ROOT" dolt remote list 2>/dev/null) || _rl=""
-    _no_remote=0; printf '%s' "$_rl" | grep -qi 'no remotes' && _no_remote=1
+    _no_remote=0; grep -qi 'no remotes' <<<"$_rl" && _no_remote=1
     if [ "$ALLOW_MIGRATE" = 1 ] && [ "$_no_remote" = 1 ]; then
         warn "pending migration, no remote, --allow-migrate set → backing up and migrating"
         bd -C "$REPO_ROOT" backup >/dev/null 2>&1 || warn "bd backup returned non-zero"
@@ -101,10 +114,23 @@ fi
 # ---------------------------------------------------------------------------
 # helpers for config editing (avoid buggy `bd config set` on nested YAML)
 # ---------------------------------------------------------------------------
-# Count how many representations of a dotted key exist (flat + nested-leaf).
+# Count how many representations of a dotted key exist: flat dotted lines plus
+# nested leaves UNDER THE RIGHT PARENT only. Must be parent-aware to match the
+# removal logic in ensure_config — otherwise a same-named leaf under an unrelated
+# block (e.g. `auto-push:` under some other section) is miscounted as a duplicate
+# and trips a spurious gate 20.
 config_count() {
-    local key="$1" leaf="${1##*.}" ke; ke=$(printf '%s' "$key" | sed 's/\./\\./g')
-    grep -cE "^${ke}:|^[[:space:]]+${leaf}:" "$CFG" 2>/dev/null || true
+    local key="$1" leaf="${1##*.}" ns="${1%.*}" keyre
+    keyre=$(printf '%s' "$key" | sed 's/[][(){}.^$*+?|\\]/\\&/g')
+    awk -v keyre="$keyre" -v leaf="$leaf" -v ns="$ns" '
+        /^[^[:space:]#]/ {
+            if ($0 ~ /^[A-Za-z0-9_.-]+:[[:space:]]*$/) { cur=$0; sub(/:.*/,"",cur) }
+            else { cur="" }
+        }
+        $0 ~ "^" keyre ":"                          { c++; next }
+        ($0 ~ "^[[:space:]]+" leaf ":") && cur==ns  { c++; next }
+        END { print c+0 }
+    ' "$CFG" 2>/dev/null || printf 0
 }
 
 # Normalize a scalar key to a single flat dotted line "key: value".
@@ -156,7 +182,11 @@ ensure_config() {
 # 3. Durability first: ensure the Dolt remote + first push
 # ---------------------------------------------------------------------------
 head_ "Durability (remote + push)"
-if bd -C "$REPO_ROOT" dolt remote list 2>/dev/null | grep -qiv 'no remotes'; then
+# "configured" = non-empty output that does not say "no remotes". Capture then
+# test (a here-string, not a `grep -qv` pipe) to avoid the pipefail/SIGPIPE
+# inversion that could misread a real remote as absent and re-add it.
+_remotes=$(bd -C "$REPO_ROOT" dolt remote list 2>/dev/null) || _remotes=""
+if [ -n "$_remotes" ] && ! grep -qi 'no remotes' <<<"$_remotes"; then
     ok "dolt remote already configured"
 else
     ORIGIN=$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)
@@ -168,8 +198,10 @@ bd -C "$REPO_ROOT" dolt commit -m "beads-config-audit: pre-push" >/dev/null 2>&1
 if ! bd -C "$REPO_ROOT" dolt push >/dev/null 2>&1; then
     gate 15 "'bd dolt push' failed — remote durability not established (is the git remote initialized?). Stopping before any JSONL removal."
 fi
-git -C "$REPO_ROOT" ls-remote origin refs/dolt/data 2>/dev/null | grep -q . \
-    || gate 15 "refs/dolt/data missing on remote after push"
+# Capture then test for non-empty (not `| grep -q .`, which can SIGPIPE-invert
+# under pipefail and misreport a present ref as missing).
+_ref=$(git -C "$REPO_ROOT" ls-remote origin refs/dolt/data 2>/dev/null) || _ref=""
+[ -n "$_ref" ] || gate 15 "refs/dolt/data missing on remote after push"
 ok "refs/dolt/data present on remote"
 
 # ---------------------------------------------------------------------------
@@ -187,6 +219,16 @@ ok "dolt.auto-commit = $AC (left at default)"
 
 # JSONL hygiene -------------------------------------------------------------
 head_ "JSONL hygiene"
+# Clean-index baseline: move anything the user had already staged back to the
+# working tree (preserved — just un-staged) BEFORE we stage any of our own
+# changes, so the section-7 commit contains ONLY the audit's changes. That
+# commit must omit a pathspec (a pathspec commit rebuilds from the working tree
+# and would drop the `git rm --cached` untracks below), so without this reset it
+# would fold unrelated pre-staged work into the audit commit. Only when we intend
+# to commit, and only with a born HEAD (a fresh repo has nothing staged-vs-HEAD).
+if [ "$DO_COMMIT" = 1 ] && git -C "$REPO_ROOT" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    git -C "$REPO_ROOT" reset -q 2>/dev/null || true
+fi
 gi="$BEADS_DIR/.gitignore"; [ -f "$gi" ] || gi="$REPO_ROOT/.gitignore"
 add_ignore() { grep -qxF "$1" "$gi" 2>/dev/null || printf '%s\n' "$1" >> "$gi"; }
 
@@ -229,15 +271,16 @@ head_ "Git hooks"
 # 6. Verify
 # ---------------------------------------------------------------------------
 head_ "Verify"
-bd -C "$REPO_ROOT" list >/dev/null 2>&1 && ok "bd list works" || warn "bd list failed"
-bd -C "$REPO_ROOT" vc status >/dev/null 2>&1 && ok "bd vc status works" || warn "bd vc status failed"
+if bd -C "$REPO_ROOT" list >/dev/null 2>&1; then ok "bd list works"; else warn "bd list failed"; fi
+if bd -C "$REPO_ROOT" vc status >/dev/null 2>&1; then ok "bd vc status works"; else warn "bd vc status failed"; fi
 # gitignore assertions for the DB dir, credential, legacy db (ensured above)
 for pat in "$data_base/" ".beads-credential-key" "*.db"; do
-    grep -qF "$pat" "$gi" 2>/dev/null && ok "gitignored: $pat" || warn "not gitignored: $pat (check $gi)"
+    if grep -qF "$pat" "$gi" 2>/dev/null; then ok "gitignored: $pat"; else warn "not gitignored: $pat (check $gi)"; fi
 done
-# capture-then-test avoids a pipefail/SIGPIPE inversion that could mis-report a
-# tracked DB dir as untracked (grep -q exits early -> git dies -> pipeline fails)
-if [ -n "$(git -C "$REPO_ROOT" ls-files "$DATA_DIR" 2>/dev/null | head -n1)" ]; then
+# Capture then test (no `| head -n1`): an early-closing consumer would make git
+# SIGPIPE and, under pipefail, mis-report a tracked DB dir as untracked.
+_db_tracked=$(git -C "$REPO_ROOT" ls-files "$DATA_DIR" 2>/dev/null) || _db_tracked=""
+if [ -n "$_db_tracked" ]; then
     warn "DB dir is TRACKED — must not be committed"
 else
     ok "DB dir not tracked"
@@ -256,7 +299,13 @@ if [ "$DO_COMMIT" = 1 ]; then
     if git -C "$REPO_ROOT" diff --cached --quiet -- "$@" 2>/dev/null; then
         ok "no changes to commit"
     else
-        git -C "$REPO_ROOT" commit -q -m "beads-config-audit: normalize config, hooks, and gitignore" -- "$@"
+        # Commit the staged index (NO pathspec). A pathspec commit
+        # (`git commit -- <paths>`) rebuilds those paths from the WORKING TREE,
+        # which silently drops the `git rm --cached` untrack of interactions.jsonl
+        # (the file is deliberately kept on disk) — leaving it tracked forever and
+        # making the next run abort on an empty `git commit`. The targeted staging
+        # above already scoped the index to the paths we touched.
+        git -C "$REPO_ROOT" commit -q -m "beads-config-audit: normalize config, hooks, and gitignore"
         ok "committed audit changes"
     fi
 fi

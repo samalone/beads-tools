@@ -106,9 +106,13 @@ ensure_block() {
         END { last=NR; while (last>0 && buf[last] ~ /^[[:space:]]*$/) last--;
               for (i=1;i<=last;i++) print buf[i] }
     ' > "$tmp"
+    # single blank separator line before our block (only if the file is non-empty).
+    # Computed BEFORE the append redirect below so we never read "$tmp" inside the
+    # same command that writes it (avoids SC2094 read/write-in-pipeline).
+    local sep=''
+    [ -s "$tmp" ] && sep=$'\n'
     {
-        # single blank separator line before our block (only if the file is non-empty)
-        [ -s "$tmp" ] && printf '\n'
+        printf '%s' "$sep"
         printf '%s\n' "$BEGIN_MARK"
         "$body_fn"
         printf '%s\n' "$END_MARK"
