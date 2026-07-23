@@ -5,9 +5,15 @@
 # /var/tmp), so fixtures live under $HOME by default; override with
 # BD_TESTS_TMPDIR pointing at any bd-safe directory.
 #
-# Teardown stops only the fixture's own Dolt server (project-scoped
-# `bd -C <proj> dolt stop --force`) — NEVER `bd dolt killall`, which is
-# machine-wide and would kill a developer's real server for another project.
+# Teardown stops only the fixture's own Dolt server, project-scoped
+# (`bd -C <proj> dolt stop --force`). Note on killall: `bd dolt killall` is
+# ALSO project-scoped in standalone mode — per `bd dolt killall --help`, it only
+# reaps servers using the current project's Dolt data directory and "Other
+# projects' servers are preserved." So bd-mode's server-quiesce killall, which
+# runs in the fixture's own context, cannot touch a developer's unrelated live
+# server (verified: the suite runs with other live project servers untouched).
+# Only under an orchestrator ($GT_ROOT) is killall broader, and the tests never
+# set that up.
 
 # This file is sourced via bats `load`; the vars/functions below are the harness
 # API consumed by the .bats files, which shellcheck can't see across the load.
