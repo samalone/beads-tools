@@ -256,7 +256,13 @@ if [ "$DO_COMMIT" = 1 ]; then
     if git -C "$REPO_ROOT" diff --cached --quiet -- "$@" 2>/dev/null; then
         ok "no changes to commit"
     else
-        git -C "$REPO_ROOT" commit -q -m "beads-config-audit: normalize config, hooks, and gitignore" -- "$@"
+        # Commit the staged index (NO pathspec). A pathspec commit
+        # (`git commit -- <paths>`) rebuilds those paths from the WORKING TREE,
+        # which silently drops the `git rm --cached` untrack of interactions.jsonl
+        # (the file is deliberately kept on disk) — leaving it tracked forever and
+        # making the next run abort on an empty `git commit`. The targeted staging
+        # above already scoped the index to the paths we touched.
+        git -C "$REPO_ROOT" commit -q -m "beads-config-audit: normalize config, hooks, and gitignore"
         ok "committed audit changes"
     fi
 fi
