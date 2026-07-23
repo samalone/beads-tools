@@ -212,6 +212,16 @@ ok "dolt.auto-commit = $AC (left at default)"
 
 # JSONL hygiene -------------------------------------------------------------
 head_ "JSONL hygiene"
+# Clean-index baseline: move anything the user had already staged back to the
+# working tree (preserved — just un-staged) BEFORE we stage any of our own
+# changes, so the section-7 commit contains ONLY the audit's changes. That
+# commit must omit a pathspec (a pathspec commit rebuilds from the working tree
+# and would drop the `git rm --cached` untracks below), so without this reset it
+# would fold unrelated pre-staged work into the audit commit. Only when we intend
+# to commit, and only with a born HEAD (a fresh repo has nothing staged-vs-HEAD).
+if [ "$DO_COMMIT" = 1 ] && git -C "$REPO_ROOT" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    git -C "$REPO_ROOT" reset -q 2>/dev/null || true
+fi
 gi="$BEADS_DIR/.gitignore"; [ -f "$gi" ] || gi="$REPO_ROOT/.gitignore"
 add_ignore() { grep -qxF "$1" "$gi" 2>/dev/null || printf '%s\n' "$1" >> "$gi"; }
 
