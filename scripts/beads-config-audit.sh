@@ -247,13 +247,16 @@ fi
 # 7. Commit the audit changes (no branch push)
 # ---------------------------------------------------------------------------
 if [ "$DO_COMMIT" = 1 ]; then
-    git -C "$REPO_ROOT" add -A -- .beads .gitignore 2>/dev/null || true
-    # Scope both the check and the commit to our paths, so a pre-existing staged
-    # index (unrelated work) is neither counted nor swept into this commit.
-    if git -C "$REPO_ROOT" diff --cached --quiet -- .beads .gitignore 2>/dev/null; then
+    # Stage only the paths we touched (so a pre-existing staged index isn't swept
+    # in), and include root .gitignore ONLY if it exists — otherwise the pathspec
+    # errors out and `|| true` would hide it, leaving the repair uncommitted.
+    set -- .beads
+    [ -f "$REPO_ROOT/.gitignore" ] && set -- "$@" .gitignore
+    git -C "$REPO_ROOT" add -A -- "$@" 2>/dev/null || true
+    if git -C "$REPO_ROOT" diff --cached --quiet -- "$@" 2>/dev/null; then
         ok "no changes to commit"
     else
-        git -C "$REPO_ROOT" commit -q -m "beads-config-audit: normalize config, hooks, and gitignore" -- .beads .gitignore
+        git -C "$REPO_ROOT" commit -q -m "beads-config-audit: normalize config, hooks, and gitignore" -- "$@"
         ok "committed audit changes"
     fi
 fi

@@ -105,7 +105,8 @@ resolve_self_dir() {
 BIN_DIR=$(resolve_self_dir 2>/dev/null || true)
 HOOKS_SH="${BIN_DIR:-}/../scripts/beads-hooks.sh"
 
-BEADS_DIR=$(bd context 2>/dev/null | awk '/beads dir:/{print $NF; exit}')
+# Keep the full path after "beads dir:" — $NF would truncate a path with spaces.
+BEADS_DIR=$(bd context 2>/dev/null | sed -n 's/^[[:space:]]*beads dir:[[:space:]]*//p' | head -n1)
 [ -n "$BEADS_DIR" ] && [ -d "$BEADS_DIR" ] || die "could not locate a .beads directory (run inside a beads project)"
 REPO_ROOT=$(git -C "$BEADS_DIR" rev-parse --show-toplevel 2>/dev/null) || die "beads dir is not inside a git repository"
 
