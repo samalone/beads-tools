@@ -25,9 +25,7 @@ is not the place to run the plugin against other projects.
 ```text
 .claude-plugin/plugin.json      plugin manifest (name, version, $schema)
 bin/bd-mode                     CLI: switch a beads project embedded <-> server mode
-scripts/beads-config-audit.sh   deterministic audit/repair to my Dolt preferences (gated)
 scripts/beads-hooks.sh          install/check the Dolt-sync git hooks
-skills/beads-config-audit/      the skill that orchestrates the audit script
 hooks/hooks.json                SessionStart: symlink bd-mode into ~/.local/bin
 README.md                       user-facing overview
 ```
@@ -73,8 +71,8 @@ brew install bats-core shellcheck jq          # bd 1.1.x must already be install
 claude plugin validate ./
 claude --plugin-dir ./                         # load the real layout locally, then /reload-plugins
 
-bash -n bin/bd-mode scripts/beads-config-audit.sh scripts/beads-hooks.sh   # syntax
-shellcheck bin/bd-mode scripts/beads-config-audit.sh scripts/beads-hooks.sh
+bash -n bin/bd-mode scripts/beads-hooks.sh   # syntax
+shellcheck bin/bd-mode scripts/beads-hooks.sh
 bats test/                                     # ~3 min; isolated bd + Dolt fixtures
 ```
 

@@ -73,12 +73,12 @@ jobs:
 
       - name: Shellcheck
         run: |
-          shellcheck bin/bd-mode scripts/beads-config-audit.sh scripts/beads-hooks.sh
+          shellcheck bin/bd-mode scripts/beads-hooks.sh
           shellcheck -x test/helpers/setup.bash
 
       - name: Syntax check
         run: |
-          bash -n bin/bd-mode scripts/beads-config-audit.sh scripts/beads-hooks.sh
+          bash -n bin/bd-mode scripts/beads-hooks.sh
 
       # Fixtures live under $HOME (bd rejects /tmp); the runner home is bd-safe.
       - name: Run bats suite
