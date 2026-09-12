@@ -41,8 +41,10 @@ of the same clone open at once. All of them share the one live task graph, so:
 
 ## Closing beads vs. merging code
 
-- Close a bead when its **work is done** — typically as you open the PR. Do not
-  wait for the PR to merge, and do not treat closing a bead as a way to
+- Close a bead as soon as the code implementing it is written (and preferably
+  tested) — not when you open the PR, and not when the PR merges. Closing is
+  independent of the PR lifecycle, so closing early is what lets a blocked
+  follow-on bead become ready; do not treat closing a bead as a way to
   coordinate other work.
 - A **plain dependency** (`bd dep add B A`) unblocks B as soon as A is *closed*
   (work done), which can be well before A's PR merges. Use it only when B needs
