@@ -27,17 +27,14 @@ is not the place to run the plugin against other projects.
 bin/bd-mode                     CLI: switch a beads project embedded <-> server mode
 scripts/beads-config-audit.sh   deterministic audit/repair to my Dolt preferences (gated)
 scripts/beads-hooks.sh          install/check the Dolt-sync git hooks
-scripts/inject-beads-workflow.sh SessionStart injector for my beads/PR guidance
-shared/beads-pr-workflow.md     the guidance that injector emits
 skills/beads-config-audit/      the skill that orchestrates the audit script
-hooks/hooks.json                SessionStart: symlink bd-mode into ~/.local/bin + inject
+hooks/hooks.json                SessionStart: symlink bd-mode into ~/.local/bin
 README.md                       user-facing overview
 ```
 
 ## Design conventions (honor these)
 
 - **Shell:** `#!/usr/bin/env bash` + `set -euo pipefail` for the tools;
-  `/usr/bin/env sh` for `inject-beads-workflow.sh` and the injected hook payloads.
 - **Portability:** primary platform is macOS (BSD userland), but the plugin ships
   to all my machines — keep it Linux/GNU-safe. No `sed -i ''`, no `readlink -f`;
   write-to-temp-then-`mv`, hand-rolled symlink resolution, `timeout`/`gtimeout`
@@ -77,9 +74,7 @@ claude plugin validate ./
 claude --plugin-dir ./                         # load the real layout locally, then /reload-plugins
 
 bash -n bin/bd-mode scripts/beads-config-audit.sh scripts/beads-hooks.sh   # syntax
-sh -n scripts/inject-beads-workflow.sh                                     # POSIX injector
 shellcheck bin/bd-mode scripts/beads-config-audit.sh scripts/beads-hooks.sh
-shellcheck -s sh scripts/inject-beads-workflow.sh                          # POSIX rules
 bats test/                                     # ~3 min; isolated bd + Dolt fixtures
 ```
 

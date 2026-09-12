@@ -6,10 +6,6 @@
           {
             "type": "command",
             "command": "[ -n \"${CLAUDE_PLUGIN_ROOT:-}\" ] && mkdir -p \"$HOME/.local/bin\" && ln -sf \"${CLAUDE_PLUGIN_ROOT}/bin/bd-mode\" \"$HOME/.local/bin/bd-mode\" || true"
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/inject-beads-workflow.sh\""
           }
         ]
       }

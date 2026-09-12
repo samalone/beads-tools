@@ -10,7 +10,6 @@ A Claude Code plugin packaging my [Beads](https://github.com/gastownhall/beads)
 | **`bd-mode`** (CLI, `bin/`) | Report or switch a beads project between **embedded** and **project-server** mode, transferring the Dolt database and keeping the install equivalent. Symlinked into `~/.local/bin` on session start. |
 | **`beads-config-audit`** (skill + `scripts/beads-config-audit.sh`) | Deterministic audit + repair to my single-user Dolt preferences (export off, remote + `refs/dolt/data`, mode-appropriate `dolt.auto-push`, backup git-push off, sync hooks). The skill orchestrates the script and handles the judgment gates. |
 | **`beads-hooks.sh`** (`scripts/`) | Installs git hooks that sync Dolt data with the git remote: `pre-push` → `bd dolt commit && bd dolt push` (origin), `post-merge` → `bd dolt pull`. Mode-independent, non-blocking, and preserved across `bd hooks install`. |
-| **Workflow injector** (`scripts/inject-beads-workflow.sh` + `shared/`) | A SessionStart hook that injects my beads/PR-workflow guidance, but only in projects that use beads. Auto-registers on install — no per-machine `settings.json` entry. |
 
 ## Install (per machine)
 
@@ -60,9 +59,7 @@ brew install bats-core shellcheck jq         # bd 1.1.x must already be installe
 claude plugin validate ./
 
 bash -n bin/bd-mode scripts/beads-config-audit.sh scripts/beads-hooks.sh
-sh -n scripts/inject-beads-workflow.sh
 shellcheck bin/bd-mode scripts/beads-config-audit.sh scripts/beads-hooks.sh
-shellcheck -s sh scripts/inject-beads-workflow.sh
 bats test/                                    # ~3 min; spins real bd + Dolt in throwaway fixtures
 ```
 
