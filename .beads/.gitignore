@@ -77,3 +77,7 @@ bd.db
 # since no pattern above ignores them.
 issues.jsonl
 interactions.jsonl
+
+# Added by bd (missing required patterns)
+*.gate.lock*
+dolt-server-config.yaml
